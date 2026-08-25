@@ -591,7 +591,7 @@ data resource. One row each.
 
 | `ID` | Trust relationship | Exact binding / config string | What it confers | Scoping condition observed | Revocation action |
 |---|---|---|---|---|---|
-| `T-wif-*` | WIF pool + provider | `oidc.issuerUri`, `attributeCondition` (CEL, verbatim), `allowed_audiences` | Which external subjects become GCP principals | The literal CEL text — an empty condition means every token the issuer signs is accepted | Delete provider (note: pools/providers are pools/providers are **undeletable-for-30-days** in the sense that they can be *undeleted* for 30 days before the deletion becomes permanent) |
+| `T-wif-*` | WIF pool + provider | `oidc.issuerUri`, `attributeCondition` (CEL, verbatim), `allowed_audiences` | Which external subjects become GCP principals | The literal CEL text — an empty condition means every token the issuer signs is accepted | Delete provider (note: a deleted pool or provider can be **undeleted for 30 days**, so deletion is suspension, not destruction — see test `WI-10`) |
 | `T-bind-*` | IAM binding to a federated principal | `principal://…/subject/…`, `principalSet://…/attribute.X/Y`, `principalSet://…/POOL/*` | Roles held by external subjects | `/*` = every identity in the pool | Remove the binding |
 | `T-wfif-*` | Workforce pool | `principal://iam.googleapis.com/locations/global/workforcePools/POOL/subject/…` (no project number), `--session-duration`, `--disable-programmatic-signin` | Console + gcloud for on-prem humans without Cloud Identity accounts | Session duration; 12h ceiling on an admin-capable pool is a finding | Delete provider |
 | `T-cicd-*` | Pipeline → project | Repo/pipeline identifier, runner placement, the SA it assumes, the projects it can deploy to | Deploy-time `actAs` and guardrail mutation | Branch/environment protection; WIF attribute condition if any | Remove the SA's roles or the runner's credential |
@@ -1296,7 +1296,7 @@ Three v19 changes that break older mappings:
    (SaaS, Execution).
 
 The GCP manifestations below are analyst mappings. For `T1578`, `T1666` and `T1685.002` the ATT&CK
-pages themselves carry only AWS/Azure/Office examples — present the GCP framing as our mapping, and
+pages themselves carry only AWS/Azure/Office examples — present the GCP framing as an analyst mapping, and
 verify against current docs before quoting ATT&CK directly.
 
 | ID | Name | Tactic | GCP manifestation here | Paths |
@@ -2720,7 +2720,7 @@ Terraform's field is `enforcement_version` (snake_case) and it accepts the strin
 9. **WI-09 — no structural requirement for a real condition.** No custom org policy constraint on `iam.googleapis.com/WorkloadIdentityPoolProvider` requires a non-empty `resource.attributeCondition`. This is the only documented way to require an attribute condition org-wide, and the only control that catches the "condition present but useless" case; the list constraint cannot express it. → **MEDIUM**.
 10. **WI-10 — resurrectable trust.** Any pool or provider appears in `--show-deleted` output within its 30-day undelete window. → **MEDIUM**; record who can undelete.
 11. **WI-11 — GKE binding too broad.** A binding uses `principalSet://.../PROJECT_ID.svc.id.goog/namespace/NAMESPACE` (any KSA in the namespace — so namespace-create becomes credential-create) or `principalSet://.../PROJECT_ID.svc.id.goog/kubernetes.cluster/https://container.googleapis.com/v1/projects/.../clusters/CLUSTER` (the whole cluster). → **HIGH**. The correct form is `principal://.../PROJECT_ID.svc.id.goog/subject/ns/NAMESPACE/sa/KSA_NAME`. Also flag the legacy annotation form (`iam.gke.io/gcp-service-account` + `roles/iam.workloadIdentityUser` on `PROJECT_ID.svc.id.goog[NAMESPACE/KSA]`) presented as the current approach — it is still supported, but the modern path is direct `principal://` resource binding with no GSA at all.
-12. **WI-12 — impersonation where direct access would do.** A federated principal is granted `roles/iam.workloadIdentityUser` on a service account when the resource roles it needs could be bound directly to the `principal://`/`principalSet://`. → **HIGH**. Direct access gives exactly the granted roles and keeps the federated principal in the data-plane audit log; impersonation inherits **everything the SA has everywhere** and launders identity — the data-plane log shows `principalEmail = <service account>`, with the real caller only in `protoPayload.authenticationInfo.serviceAccountDelegationInfo.firstPartyPrincipal.principalEmail`, and **only if Data Access logs are enabled**. Revocation differs too: one resource unbind versus finding every `workloadIdentityUser` binding on every SA. (Per-product support for direct access: check the identity-federation supported-products page — the matrix did not render in validation, so verify against current docs.)
+12. **WI-12 — impersonation where direct access would do.** A federated principal is granted `roles/iam.workloadIdentityUser` on a service account when the resource roles it needs could be bound directly to the `principal://`/`principalSet://`. → **HIGH**. Direct access gives exactly the granted roles and keeps the federated principal in the data-plane audit log; impersonation inherits **everything the SA has everywhere** and launders identity — the data-plane log shows `principalEmail = <service account>`, with the real caller only in `protoPayload.authenticationInfo.serviceAccountDelegationInfo.firstPartyPrincipal.principalEmail`, and **only if Data Access logs are enabled**. Revocation differs too: one resource unbind versus finding every `workloadIdentityUser` binding on every SA. (Per-product support for direct access: check the identity-federation supported-products page — the matrix does not render reliably, so verify against current docs.)
 13. **WI-13 — token exchange invisible.** Data Access `ADMIN_READ` is not enabled for `sts.googleapis.com`, so `google.identity.sts.v1.SecurityTokenService.ExchangeToken` produces no log entry and there is no record of any federated token ever being minted. → **HIGH**.
 14. **WI-14 — air-gapped GHES claiming OIDC federation.** The environment is an air-gapped GitHub Enterprise Server and a design claims GHES OIDC → WIF. Test it against the two stated requirements: Google must reach `https://HOSTNAME/_services/token/.well-known/openid-configuration` and `.../jwks`, and the `iss` claim must be "a publicly routable URL". An air-gapped GHES satisfies neither. → report the design as **non-functional**, not as a control. Statically pinning the GHES signing keys via `oidc.jwks_json` / `--jwk-json-path` removes the JWKS-fetch dependency, but the publicly-routable-issuer requirement still stands and Google publishes no GHES-with-static-JWKS pattern — **verify against current docs and require a working proof of concept before anyone designs around it**; it also fails silently on every GHES key rotation. Then find what the runners actually use:
    | Mechanism | Works air-gapped | Review posture |
@@ -5829,10 +5829,10 @@ bastion and review **that**.
 
 **Ask verbatim.**
 
-5. *"For each self-hosted runner: its hostname, its runner group, the full list of repositories that
+1. *"For each self-hosted runner: its hostname, its runner group, the full list of repositories that
    may target that group, the OS user the job runs as, and every Google credential readable by that
    user."*
-6. *"Which workflow triggers can run on that runner — `push`, `pull_request` from forks,
+2. *"Which workflow triggers can run on that runner — `push`, `pull_request` from forks,
    `workflow_dispatch`, `schedule` — and who can create them?"*
 
 **Finding tests.**
@@ -5870,8 +5870,8 @@ bastion and review **that**.
 - **LM-61 (deleted-pool window)** — test `WI-10`: a deleted pool can be undeleted for 30 days, so
   deletion is suspension, not destruction. Record who can undelete.
 
-  Run all four against the runners' providers specifically: a provider that is tight for one
-  repository is not tight for a runner group that many repositories can target.
+Run every test above against the runners' providers specifically: a provider that is tight for one
+repository is not tight for a runner group that many repositories can target.
 
 #### 7.3.3 Federated humans from the interior IdP / AD (Workforce Identity Federation)
 
@@ -7311,16 +7311,18 @@ Appendices:
 
 1. Write the full report to a Markdown file at an absolute path:
    `gcp-security-review-<ORG_ID_or_scope>-<YYYY-MM-DD>.md`. This file is the source of truth; do not
-   truncate it to fit a chat window and do not split it across files.
+   truncate it to fit whatever surface you report through, and do not split it across files.
 2. Run the anti-fluff gate (11.6) against that file. Revise and re-run until it passes.
 3. Ask the literal publication question in 11.4.4, then:
-   - **If the Artifact tool is available and the answer is yes**: load the `artifact-design` skill
-     first (the Artifact tool's own contract requires it), author a self-contained HTML page from the
-     Markdown — no external scripts, stylesheets, or images — give it a short noun-phrase `<title>`
-     naming the engagement, pass a stable `favicon`, and publish. Report the returned URL. Artifacts
-     start private. Do not brand the page as the customer organization or any real company; do not
-     attempt to distribute it by any other route if publishing is refused.
-   - **If the Artifact tool is not available, or the answer is no**: leave the Markdown file in place,
+   - **If your environment can publish an HTML page and the answer is yes**: author a self-contained
+     HTML page from the Markdown — every stylesheet and script inline, no external scripts,
+     stylesheets, fonts, or images — laid out for reading rather than dumped as raw Markdown: a
+     contents list, the finding-count table by band, and one anchored section per finding. Give it a
+     short noun-phrase `<title>` naming the engagement. Publish it to a destination that is private by
+     default, confirm it is private before you hand over the link, and report the URL. Do not brand
+     the page as the customer organization or any real company; do not attempt to distribute it by any
+     other route if publishing is refused.
+   - **If no publishing mechanism is available, or the answer is no**: leave the Markdown file in place,
      print its absolute path, and print inline: the finding-count table by band, and the ID + title +
      one-line severity arithmetic for every `CRITICAL` and `HIGH` finding, plus the top 3 chains with
      their cheapest severing controls. The reader must get the headline without opening the file.
@@ -7350,8 +7352,8 @@ Ask these verbatim when the corresponding input cannot be resolved from evidence
   dry-run today — that is, does `status` carry the restricted services and resources, or only
   `spec`?"**
 - Before publishing: **"This report names live projects, service accounts, datasets, and network
-  ranges. Do you want it published as a private Artifact link, or kept as a local Markdown file
-  only?"**
+  ranges. Do you want it published as a private web page with a link, or kept as a local Markdown
+  file only?"**
 - Target environment, when not supplied at invocation: **"What is the organization ID or folder
   scope for this review, and which projects are in scope?"**
 
@@ -7555,15 +7557,14 @@ Appendix A and the literal question in Appendix F, and re-run the gate.
 
 ## Verify against current docs
 
-**Fact base gathered 2026-08-25**, entirely from `docs.cloud.google.com` (the `cloud.google.com`
-paths 301-redirect and break fetchers that do not follow cross-host redirects), plus MITRE ATT&CK
-v19.0/v19.1 (released 2026-04-28) and the GitHub Enterprise Server docs at versions 3.15, 3.17 and
-3.21. Every identifier in this skill that is **not** listed below was read off a rendered official
-page on that date. Everything listed below was **not** confirmed and carries the literal marker
-`verify against current docs` at its point of use in the body. The two sets are **not** 1:1 by count —
-one row routinely covers two or three identifiers that each carry their own marker, and the marker
-sometimes reads `(verify against current docs)`, sometimes `— verify against current docs`. Derive the
-counts, never assert them:
+**Identifiers verified against official documentation as of 2026-08-25** — `docs.cloud.google.com`,
+MITRE ATT&CK v19.0/v19.1 (released 2026-04-28), and the GitHub Enterprise Server docs at versions
+3.15, 3.17 and 3.21. Every identifier in this skill that is **not** listed below was read off a
+rendered official page on that date. Everything listed below was **not** confirmed and carries the
+literal marker `verify against current docs` at its point of use in the body. The two sets are
+**not** 1:1 by count — one row routinely covers two or three identifiers that each carry their own
+marker, and the marker sometimes reads `(verify against current docs)`, sometimes
+`— verify against current docs`. Derive the counts, never assert them:
 
 ```bash
 grep -c -o 'verify against current docs' SKILL_FILE     # markers, body + appendix
@@ -7605,7 +7606,6 @@ Two standing staleness warnings that outrank any individual row:
 | `VD-07` | The IAM-Condition CEL syntax for tag-scoping a `roles/orgpolicy.policyAdmin` binding (test `OP-05`, mirror case) | IAM Conditions attribute reference |
 | `VD-08` | Minimum Terraform provider versions for `google_org_policy_policy` and `google_org_policy_custom_constraint` | Provider changelog |
 | `VD-09` | Deprecation text for `google_project_organization_policy` specifically | Provider registry page |
-| `VD-10` | `gcloud org-policies describe --effective` — **now verified** against the gcloud reference SYNOPSIS `(--folder \| --organization \| --project) [--effective]`; retained as a row only so a reader of an earlier revision does not reinstate the removed hedge | gcloud reference |
 | `VD-11` | `gcloud asset analyze-org-policy-governed-assets` and `…-governed-containers` flag sets | gcloud reference |
 | `VD-12` | Casing of `constraints/compute.disableGuestAttributesAccess` — doc pages conflict | Compute org-policy page |
 | `VD-13` | Hierarchy-indicator value format (`under:organizations/…`) for `constraints/compute.restrictPrivateServiceConnectProducer` / `…Consumer` | PSC org-policy page |
@@ -7684,7 +7684,7 @@ Two standing staleness warnings that outrank any individual row:
 | `VD-71` | BigQuery, KMS and Secret Manager `setIamPolicy` audit method names (`storage.setIamPermissions` is verified) | Per-service audit-logging pages |
 | `VD-72` | IAP per-connection tunnel-authorization audit method name — **`AuthorizeUser` is NOT in the documented method list** (test `LM-14`) | IAP audit-logging page |
 | `VD-73` | Numeric TA ID for the ATT&CK v19 **Stealth** tactic (Defense Impairment is `TA0112`, verified) | ATT&CK site |
-| `VD-74` | GCP framings for `T1578`, `T1666` and `T1685.002`: the ATT&CK pages carry only AWS/Azure/Office examples. Present these as our analyst mapping, not as ATT&CK text | ATT&CK technique pages |
+| `VD-74` | GCP framings for `T1578`, `T1666` and `T1685.002`: the ATT&CK pages carry only AWS/Azure/Office examples. Present these as an analyst mapping, not as ATT&CK text | ATT&CK technique pages |
 
 ### Network, compute, GKE, PSC, DNS
 
@@ -7733,9 +7733,9 @@ Two standing staleness warnings that outrank any individual row:
 | `VD-110` | Sensitive Data Protection `gcloud dlp` command syntax, and the sensitive-data-based IAM access-control mechanism (used for the classification map in §2.2, row 26) | SDP docs |
 | `VD-111` | Managed-folder and object-prefix IAM Condition semantics as the object-level control under uniform bucket-level access (test `ISO-34`) | Cloud Storage managed-folders page |
 | `VD-112` | Per-resource `get-iam-policy` flag spellings used in §2.2, row 4 | Per-service CLI references |
-| `VD-113` | Per-product support matrix for **direct resource access** by a federated principal versus impersonation (test `WI-12`) — the matrix did not render in validation | Identity-federation supported-products page |
+| `VD-113` | Per-product support matrix for **direct resource access** by a federated principal versus impersonation (test `WI-12`) — the matrix does not render reliably on that page | Identity-federation supported-products page |
 | `VD-114` | Deny **permission-group** support per service beyond the confirmed list in test `DN-03`: the `accesscontextmanager.googleapis.com/{servicePerimeters,accessLevels,policies,authorizedOrgsDescs,gcpUserAccessBindings}.*` families, `logging.googleapis.com/exclusions.*`, `iam.googleapis.com/workloadIdentityPoolProviders.*`, `iam.googleapis.com/workforcePoolProviders.*`, `iam.googleapis.com/oauthClientCredentials.*` (used in recommended deny rules #9, #10, #11) | Deny-supported-permissions reference table |
-| `VD-115` | The three deny permission-group **forms** — `SERVICE_FQDN/RESOURCE.*`, `SERVICE_FQDN/*.*`, `SERVICE_FQDN/*.VERB` — as a taxonomy (test `DN-03`); the fact base confirms individual group strings but not the pattern list | `docs.cloud.google.com/iam/docs/deny-overview` |
+| `VD-115` | The three deny permission-group **forms** — `SERVICE_FQDN/RESOURCE.*`, `SERVICE_FQDN/*.*`, `SERVICE_FQDN/*.VERB` — as a taxonomy (test `DN-03`); official documentation confirms individual group strings but not the pattern list | `docs.cloud.google.com/iam/docs/deny-overview` |
 
 ---
 
@@ -7756,9 +7756,9 @@ question in Appendix F, and re-run.
 3. **Every chain step names the specific permission, route, or misconfiguration** that makes it
    possible, the control that should have interrupted it, and whether that control exists.
 4. **Every GCP API-surface claim is verified or marked.** Constraint names, permission strings, role
-   IDs, audit-log method names, VIP ranges, rule-schema fields, feature GA status: either it is in the
-   validated fact base, or it carries the literal marker `(verify against current docs)` at its point
-   of use. No hedged claim without the marker; no marker on a verified claim.
+   IDs, audit-log method names, VIP ranges, rule-schema fields, feature GA status: either it is
+   verified against official documentation, or it carries the literal marker
+   `(verify against current docs)` at its point of use. No hedged claim without the marker; no marker on a verified claim.
 5. **Every finding has a remediation snippet** — `gcloud` or Terraform, runnable after substitution —
    plus blast radius and rollback. Where no technical enforcement exists, the remediation names the
    compensating review gate (who, what query, what trigger) instead.
