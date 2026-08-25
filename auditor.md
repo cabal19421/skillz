@@ -1,6 +1,6 @@
 ---
 name: gcp-exfil-security-review
-description: Exfiltration-focused GCP / Google Cloud security review and audit — data-exfiltration risk assessment, privilege-escalation and service-account impersonation analysis, lateral-movement and blast-radius mapping, review of organization policy, VPC Service Controls, IAM allow + deny, Principal Access Boundary and Workload Identity Federation, plus hybrid cloud-to-on-prem connectivity security, service isolation design, and resource-hierarchy design.
+description: Use when the user asks for a Google Cloud / GCP security review, audit, or threat model with a data-exfiltration focus — including privilege-escalation and service-account impersonation chain analysis, lateral-movement and blast-radius mapping, organization-policy / VPC Service Controls / IAM allow + deny / Principal Access Boundary / Workload Identity Federation review, hybrid cloud-to-on-prem (interconnect, VPN, restricted VIP) exposure, service isolation design, or resource-hierarchy design. Not for AWS or Azure.
 ---
 
 # GCP Exfiltration-Focused Security Review
@@ -32,12 +32,17 @@ three, you have an evidence request, not a finding: emit it as an evidence reque
 - [3. Phased workflow](#3-phased-workflow)
 - [4. Threat model](#4-threat-model)
 - [5. Control assessment catalog — the reviewer's checklist](#5-control-assessment-catalog--the-reviewers-checklist)
+  - [5.1 Organization Policy](#51-organization-policy) · [5.2 VPC Firewall Policy](#52-vpc-firewall-policy) · [5.3 VPC Service Controls](#53-vpc-service-controls) · [5.4 IAM (allow policies)](#54-iam-allow-policies) · [5.5 IAM Deny](#55-iam-deny) · [5.6 Private Service Connect](#56-private-service-connect) · [5.7 Principal Access Boundary](#57-principal-access-boundary) · [5.8 Workload Identity Federation](#58-workload-identity-federation) · [5.9 Identity](#59-identity) · [5.10 Access](#510-access) · [5.11 Break-glass](#511-break-glass) · [5.12 Audit logging and detection coverage](#512-audit-logging-and-detection-coverage)
 - [6. Privilege escalation, the privilege graph, and reachability](#6-privilege-escalation-the-privilege-graph-and-reachability)
+  - [6.1 Build the privilege graph](#61-build-the-privilege-graph) · [6.2 Escalation primitive hunt list](#62-escalation-primitive-hunt-list) · [6.3 Chain output format and ranking](#63-chain-output-format-and-ranking) · [6.4 Escalation-primitive reference table](#64-escalation-primitive-reference-table) · [6.5 Graph-extraction helper](#65-graph-extraction-helper)
 - [7. Lateral movement and traversal](#7-lateral-movement-and-traversal)
+  - [7.0 Firewall evaluation order](#70-firewall-evaluation-order--read-before-scoring-any-network-hop) · [7.1 Cloud → cloud (east-west)](#71-cloud--cloud-east-west) · [7.2 Cloud → on-prem](#72-cloud--on-prem-into-the-soft-interior) · [7.3 On-prem → cloud](#73-on-prem--cloud-pivot-inward) · [7.4 The traversal map, joined to the privilege graph](#74-output-artifact-the-traversal-map-and-joining-it-to-the-privilege-graph)
 - [8. Service isolation — enforce by default](#8-service-isolation--enforce-by-default)
+  - [8.1 Identity isolation](#81-identity-isolation) · [8.2 Resource and project isolation](#82-resource-and-project-isolation) · [8.3 Network isolation](#83-network-isolation) · [8.4 Service-to-service authentication](#84-service-to-service-authentication) · [8.5 Data-plane isolation](#85-data-plane-isolation) · [8.6 Boundary isolation](#86-boundary-isolation) · [8.7 Enforcement plumbing — all three layers](#87-enforcement-plumbing--every-control-all-three-layers)
 - [9. Organization hierarchy — assessment and target design](#9-organization-hierarchy--assessment-and-target-design)
 - [10. Extensibility — the supplementary requirements file](#10-extensibility--the-supplementary-requirements-file)
 - [11. Output specification, severity rubric, report template, and the anti-fluff gate](#11-output-specification-severity-rubric-report-template-and-the-anti-fluff-gate)
+  - [11.1 Severity rubric](#111-severity-rubric) · [11.2 Finding format](#112-finding-format) · [11.3 Attack-chain findings section format](#113-attack-chain-findings-section-format) · [11.4 Report structure and emission](#114-report-structure-and-emission) · [11.5 Remediation roadmap](#115-remediation-roadmap) · [11.6 Anti-fluff enforcement gate](#116-anti-fluff-enforcement-gate)
 - [Verify against current docs](#verify-against-current-docs)
 - [Skill self-check — run before emitting](#skill-self-check--run-before-emitting)
 
@@ -47,7 +52,11 @@ three, you have an evidence request, not a finding: emit it as an evidence reque
 
 These are rules, not background. Apply them literally.
 
-### F1 — Exfil-first scoring
+They are numbered `TF1`–`TF6` ("threat framing"). Do not confuse them with the log filters `F1`–`F19`
+in §4.7.3, which are a different, backticked namespace: a bare `TF3` is this section's classification
+rule, a backticked `` `F3` `` is the federated-token-exchange log filter.
+
+### TF1 — Exfil-first scoring
 
 For every control you assess, write the answer to: *"Which specific sequence of API calls does this
 stop, and whose data does that sequence move?"* If you cannot name the sequence, the control is out
@@ -56,7 +65,7 @@ of scope for this review — drop it rather than padding the report.
 Rank two findings against each other by (data tier reached) × (how cheap the attacker's starting
 position is) × (how many principals hold the starting position). Hop count is not a ranking input.
 
-### F2 — Chain-first, never control-first
+### TF2 — Chain-first, never control-first
 
 **A perfect perimeter around a reachable admin identity is not a control.** Before you credit any
 boundary control, compute whether an adversary can arrive *inside* it by becoming an identity the
@@ -71,7 +80,7 @@ boundary trusts. Concretely:
 A control that only blocks the *last* hop of a chain whose earlier hops are unimpeded is reported as
 "single-point control on a completed chain", not as "control present".
 
-### F3 — Data classification is a first-class input
+### TF3 — Data classification is a first-class input
 
 | Tier | What it means here | Required boundary controls | Severity floor for a finding at this tier |
 |---|---|---|---|
@@ -82,11 +91,11 @@ A control that only blocks the *last* hop of a chain whose earlier hops are unim
 
 **Why CONFIDENTIAL, not NTK, is the optimization target:** its defining property is broad internal
 reach. Every internal principal is therefore a candidate starting position, so the count of viable
-starting positions — the multiplier in F1 — is maximal at this tier, and the data volume behind each
+starting positions — the multiplier in TF1 — is maximal at this tier, and the data volume behind each
 one is large. NTK has tighter access and fewer principals; it is the higher *per-record* loss but the
 smaller *attack surface*. When a control decision trades one against the other, protect CONFIDENTIAL.
 
-### F4 — Unclassified data-bearing resources are findings in their own right
+### TF4 — Unclassified data-bearing resources are findings in their own right
 
 Every data-bearing resource carries an explicit classification as a label or a Resource Manager tag.
 A resource without one is a finding with ID prefix **`DC-`**, independent of whether its access
@@ -107,7 +116,7 @@ any adversary starting position. Remediation for every `DC-` finding names the l
 already uses (read it off the resources that *are* labeled) and gives the `gcloud`/Terraform snippet
 that sets it.
 
-### F5 — The on-prem interior is an assume-breach zone (the "turtle")
+### TF5 — The on-prem interior is an assume-breach zone (the "turtle")
 
 The on-prem environment is hermetic to the public internet — hard shell — and largely flat inside —
 soft interior. Adopt an **assume-breach premise for the interior**: model every analysis as though an
@@ -129,7 +138,7 @@ access to justify that premise. Three consequences you apply as rules:
    actually permits today versus what the design document claims. A direction you did not measure is
    reported as unmeasured, not as absent.
 
-### F6 — Network position is never trust, on either side of the link
+### TF6 — Network position is never trust, on either side of the link
 
 Any service that authorizes callers because of *where they connect from* is a finding. The soft
 interior makes network position cheap to obtain, so a source-range allowance is an allowance to
@@ -175,7 +184,7 @@ Use, in this order:
 
 **When they disagree, that is a finding, not a data-quality problem.** Emit it with ID prefix
 **`DRIFT-`**, naming the resource, the IaC-declared value, the live value, and the snapshot time of
-each. Score it by F1: drift that widens an exfil boundary (a perimeter resource removed live, a
+each. Score it by TF1: drift that widens an exfil boundary (a perimeter resource removed live, a
 firewall egress rule added live, an IAM binding added live) is scored as though the live state were
 intended, plus a control-plane finding for the process that allowed it. Drift that *narrows* is
 scored as a fragility finding — the next `terraform apply` reopens the hole; name the apply pipeline.
@@ -197,7 +206,7 @@ Substitute: `ORG_ID` numeric organization ID, `FOLDER_ID`, `PROJECT_ID`, `PROJEC
 | 5 | IAM **deny** policies at every attachment point | Deny evaluates before allow. A review reading only allow policies mis-states effective access in **both** directions. | `gcloud iam policies list --attachment-point=cloudresourcemanager.googleapis.com/projects/PROJECT_NUMBER --kind=denypolicies --format=json`; repeat with `.../folders/FOLDER_ID` and `.../organizations/ORG_ID` |
 | 6 | Custom role definitions **and the principals holding each** | `iam.roles.update` on a role a principal already holds is a silent escalation — the binding never changes, so diff-based review misses it. | `gcloud asset search-all-resources --scope=organizations/ORG_ID --asset-types='iam.googleapis.com/Role' --format=json`; holders come from the row-3 export by role name |
 | 7 | Principal Access Boundary policies **and their bindings** | PAB caps what a principal can reach regardless of any IAM grant — the only hard stop on the reachability paths you will compute. Absent PAB, IAM drift is unbounded. | `gcloud iam principal-access-boundary-policies list ...` and `gcloud iam policy-bindings list ...` — both GA; **subcommand flags (`--organization`, `--location`): verify against current docs** |
-| 8 | Full service-account inventory: user-managed SAs, **default** SAs (Compute Engine, App Engine), per-service agents; and every key with its creation date | The default Compute Engine SA is the runtime identity for GCE, Cloud Run, Cloud Run functions and (since the 2024 change) Cloud Build. User-managed keys are the durable offline credential the whole review exists to catch. | `gcloud asset search-all-resources --scope=organizations/ORG_ID --asset-types='iam.googleapis.com/ServiceAccount' --format=json`; keys: `gcloud iam service-accounts keys list --iam-account=SA_EMAIL --managed-by=user --format=json` — **`--managed-by=user` is the exfil-relevant filter**; `system` keys are Google-rotated and cannot be exfiltrated |
+| 8 | Full service-account inventory: user-managed SAs, **default** SAs (Compute Engine, App Engine, and the Cloud Build legacy account `PROJECT_NUMBER@cloudbuild.gserviceaccount.com` in pre-2024 projects), per-service agents; and every key with its creation date | The default Compute Engine SA is the runtime identity for GCE, Cloud Run, Cloud Run functions and (since the 2024 change) Cloud Build. User-managed keys are the durable offline credential the whole review exists to catch. | `gcloud asset search-all-resources --scope=organizations/ORG_ID --asset-types='iam.googleapis.com/ServiceAccount' --format=json`; keys: `gcloud iam service-accounts keys list --iam-account=SA_EMAIL --managed-by=user --format=json` — **`--managed-by=user` is the exfil-relevant filter**; `system` keys are Google-rotated and cannot be exfiltrated |
 | 9 | VPC-SC: perimeters (`status` **and** `spec`), restricted-services lists, ingress/egress policies, access levels, bridges, and dry-run state | The primary GCP exfil control. A perimeter with a populated `spec` and an empty `status` enforces nothing while looking configured. | `gcloud asset export --organization=ORG_ID --content-type=access-policy --output-path=gs://BUCKET/access-policy.json`; plus `gcloud access-context-manager perimeters list --policy=POLICY_NAME --format=json`, `gcloud access-context-manager perimeters describe PERIMETER --policy=POLICY_NAME --format=json`, and **`gcloud access-context-manager perimeters dry-run list --policy=POLICY_NAME`** |
 | 10 | Firewall: hierarchical policies, network firewall policies, legacy VPC rules, the **effective** merged rule set, secure/network tags in use, and logging config | Egress posture is the network-side exfil control; east-west posture is the lateral-movement control. The two policy families are different objects and both apply. | Hierarchical (org/folder only): `gcloud compute firewall-policies list --organization=ORG_ID`; network policies: `gcloud compute network-firewall-policies list --project=PROJECT_ID`; legacy: `gcloud compute firewall-rules list --project=PROJECT_ID --format=json`; **merged, and the one that matters**: `gcloud compute networks get-effective-firewalls NETWORK --project=PROJECT_ID` and `gcloud compute instances network-interfaces get-effective-firewalls INSTANCE --network-interface=nic0 --zone=ZONE`. `firewall-rules list` alone misses every policy rule. Tags: `gcloud resource-manager tags keys list --parent=organizations/ORG_ID` (flags: verify against current docs). Exact `get-effective-firewalls` and `firewall-policies list` flag lists: verify against current docs |
 | 11 | Hybrid topology: Interconnect / VPN inventory, Cloud Routers, **BGP advertisements and effective routes in BOTH directions** | The link is a bidirectional exfil and traversal channel. What is advertised is what is reachable; the design document is not evidence. | `gcloud compute routes list --project=PROJECT_ID --format=json`; `gcloud compute routers get-status ROUTER --project=PROJECT_ID --region=REGION` (**synopsis and flags: verify against current docs**); per-session both directions: `gcloud compute routers list-bgp-routes ROUTER --region=REGION --peer=PEER --route-direction=ADVERTISED --policy-applied` and the same with `--route-direction=LEARNED`. Also capture `--advertisement-mode` / `--set-advertisement-groups` / `--set-advertisement-ranges` on each router and BGP session: a custom advertisement on a session **overrides all router-level advertisements** |
@@ -208,33 +217,44 @@ Substitute: `ORG_ID` numeric organization ID, `FOLDER_ID`, `PROJECT_ID`, `PROJEC
 | 16 | GKE: cluster configs — Workload Identity Federation for GKE, node-pool `workloadMetadataConfig`, node SAs, RBAC bindings, NetworkPolicy, Binary Authorization, all three control-plane endpoint states | With `--workload-metadata=GCE_METADATA` any pod reads the node SA token from `169.254.169.254`; if the node pool runs the default Compute SA with `roles/editor` that is project takeover from one container. Pod-to-pod is open by default. | `gcloud container clusters describe CLUSTER --location=LOCATION --format=json` — read `workloadIdentityConfig.workloadPool`, each node pool's `workloadMetadataConfig.mode`, `nodeConfig.serviceAccount`, `binaryAuthorization`, and **all three** of private-nodes / IP-based endpoint / DNS-based endpoint (checking `--enable-private-endpoint` and authorized networks alone is no longer sufficient). In-cluster: `kubectl get clusterrolebindings -o json`, `kubectl get networkpolicies -A -o json`, `kubectl get pods -A -o json` for `hostNetwork`/`privileged`/`hostPath` |
 | 17 | Cloud Run services and jobs, Cloud Run functions: runtime SA, invoker bindings, `--ingress`, `--vpc-egress` | Default runtime identity is the **Compute Engine default SA**. `allUsers` on the invoker role is public unauthenticated access. `--vpc-egress=private-ranges-only` means public egress bypasses the VPC entirely — your NGFW policies, NAT logs and flow logs never see it. | `gcloud run services list --format=json`; `gcloud run services describe SERVICE --region=REGION --format=json`; `gcloud run services get-iam-policy SERVICE --region=REGION --format=json` (search for `allUsers` on `roles/run.invoker` and `roles/cloudfunctions.invoker`) |
 | 18 | Cloud Build triggers and **the SA each build runs as** | The over-privilege moved rather than disappearing: new projects' builds default to the **Compute Engine default SA**, not the legacy Cloud Build account. Anyone who can modify build config or the triggering branch inherits that identity. | `gcloud builds triggers list --project=PROJECT_ID --format=json` — read the service account field per trigger; then check that SA's roles in the row-3 export. Also check `constraints/cloudbuild.useBuildServiceAccount` and `constraints/cloudbuild.useComputeServiceAccount` |
-| 19 | Composer, Dataflow, Dataproc, Vertex AI Workbench / notebooks, Cloud Scheduler, Cloud Tasks, Deployment Manager — environments/jobs and their attached SAs | Each is an `actAs` surface: create a workload that runs as a more privileged SA, read the token. A Dataflow job in particular is arbitrary attacker code holding a worker SA that can read any source and write any sink. | `gcloud asset search-all-resources --scope=organizations/ORG_ID --asset-types='composer.googleapis.com/Environment,dataflow.googleapis.com/Job,dataproc.googleapis.com/Cluster,aiplatform.googleapis.com/...' --format=json` (asset-type strings: verify against current docs), then per-service `describe` for the SA field |
+| 19 | Composer, Dataflow, Dataproc, Vertex AI Workbench / notebooks, Cloud Scheduler, Cloud Tasks, Deployment Manager — environments/jobs and their attached SAs | Each is an `actAs` surface: create a workload that runs as a more privileged SA, read the token. A Dataflow job in particular is arbitrary attacker code holding a worker SA that can read any source and write any sink. | One command per service, per project — asset-type strings vary by service, so do not rely on a single CAI sweep (asset-type strings: verify against current docs). `gcloud composer environments list --locations=LOCATION --format=json`; `gcloud dataflow jobs list --region=REGION --format=json`; `gcloud dataproc clusters list --region=REGION --format="table(clusterName,config.gceClusterConfig.serviceAccount)"`; `gcloud workbench instances list --location=LOCATION --format=json` (command spelling: verify against current docs); `gcloud scheduler jobs list --location=LOCATION --format="table(name,httpTarget.oidcToken.serviceAccountEmail,httpTarget.oauthToken.serviceAccountEmail)"`; `gcloud tasks queues list --location=LOCATION --format=json` then read each task's `oidcToken`/`oauthToken` service account; `gcloud deployment-manager deployments list --format=json` (legacy — if any deployment exists, record that it runs as `PROJECT_NUMBER@cloudservices.gserviceaccount.com`). Then per-service `describe` for the SA field. **The same enumeration is repeated in §7.1.1 — collect once, cite both places.** |
 | 20 | Workload Identity Federation: pools, providers, **attribute mappings and attribute conditions**, and the SAs federated principals may impersonate | The top exfil bridge from outside into GCP. An empty or permissive `attributeCondition` on an external OIDC issuer means any principal from that IdP can assume the mapped identity. | `gcloud iam workload-identity-pools list --location=global --show-deleted --format=json`; `gcloud iam workload-identity-pools providers list --workload-identity-pool=POOL --location=global --format=json` — read `attributeMapping` and `attributeCondition`. Impersonation targets: grep the row-3 export for `principalSet://iam.googleapis.com/projects/.../workloadIdentityPools/` members and `roles/iam.workloadIdentityUser` |
 | 21 | Identity: Cloud Identity / Workspace configuration, SSO and MFA (2SV) enforcement, **super-admin inventory**, delegated-admin role assignments, human-vs-non-human split, group membership **and nesting** | Super admins are implicitly able to modify the org node's IAM policy and to grant themselves any role — they sit **above** org policy, perimeters, sinks, and bucket locks. Group-write grants roles without any IAM change appearing in a project's policy. | Super admins: Admin SDK Directory API `GET https://admin.googleapis.com/admin/directory/v1/users?domain=DOMAIN&query=isAdmin=true` — **returns super admins only**, and can be up to 36 h stale. Delegated admins (Groups Admin, Security Settings) are **not** returned: enumerate Admin SDK `roleAssignments` as well (**exact endpoints: verify against current docs**). Group nesting: Cloud Identity Groups API `groups.memberships.searchTransitiveMemberships()`. 2SV: Admin console → Security → Authentication → 2-step verification; session length: Security → Access and data control → Google Cloud session control |
 | 22 | Break-glass identities and roles: who/what they are, how they are stored, what gates their use, what alerts on it, and **whether they bypass VPC-SC** | A break-glass identity in a perimeter's ingress rule or access level is a standing exfil path with a legitimate-looking name. | No single API. Request the runbook, then verify it against evidence: the principal's bindings in the row-3 export, its presence in any perimeter `ingressPolicies` / access level `members`, any IAM Deny exception naming it, and the alerting policy that fires on its use |
 | 23 | Audit-log configuration: `auditConfigs` per node, sinks at **every** scope, log-bucket retention and lock state, and who can modify sinks | Data Access logs are **off by default** for everything except BigQuery — which means most of the read activity that constitutes exfil is invisible. Policy Denied logs (every VPC-SC violation) expire at 30 days unless routed. An org sink is invisible to `gcloud logging sinks list --project=X`. | `gcloud projects get-iam-policy PROJECT_ID --format=json` (and folder/org equivalents) — read `auditConfigs`, checking `logType` ∈ {`ADMIN_READ`,`DATA_READ`,`DATA_WRITE`} and treating any non-empty `exemptedMembers` as an audit-evasion primitive. `gcloud logging sinks list --organization=ORG_ID`, then repeat with `--folder=`, `--project=`, `--billing-account=` for **every** node; `gcloud logging sinks describe SINK --organization=ORG_ID` for `writerIdentity`, `includeChildren`, `filter`, `exclusions`, `disabled`; `gcloud logging buckets list --project=DEST_PROJECT` for `retentionDays` and locked state |
 | 24 | CI/CD and IaC control plane: which repos/pipelines deploy to which projects, what identity each assumes, who approves and who can bypass approval, where Terraform state lives and who can read it | The pipeline is a standing `actAs` grant into every project it deploys to. Terraform state routinely contains secrets — the state bucket's read ACL is a data-tier finding, not an ops detail. | Repo/pipeline → project map and workflow definitions from the IaC repo; deploy identity from the pipeline config; state bucket IAM from row 4. Branch protection / required-reviewer settings from the GHES repo settings |
 | 25 | GHES specifics: self-hosted runner **placement**, and exactly how runners obtain cloud credentials | In an air-gapped GHES estate this is the crossing point between the soft interior and cloud. GHES OIDC → WIF requires Google to fetch JWKS from a publicly routable issuer, so in a genuinely air-gapped deployment **WIF is not achievable and key-based auth is what these environments actually run** — which makes the SA key the primary exfil primitive. | Ask (literal questions in the interview bank below) and verify: runner host inventory (GCE VM / GKE pod / on-prem hardware), whether runners are per-repo or shared, the secret names injected into workflows, and whether any `*.json` SA key is delivered as an Actions secret. If a runner uses WIF, read the provider's `attributeCondition` and confirm it pins repo **and** ref/environment. **GHES-with-static-JWKS as a workaround: verify against current docs and require a proof-of-concept before designing around it** |
-| 26 | The data classification map: which resources hold which tier | Without it, F1 has no multiplier and every finding degrades to generic hygiene. | Preferred: the org's own map (file/spreadsheet/tag taxonomy). Derive and cross-check from labels/tags: `gcloud asset search-all-resources --scope=organizations/ORG_ID --asset-types='storage.googleapis.com/Bucket,bigquery.googleapis.com/Dataset' --query="labels.CLASSIFICATION_KEY:*" --format=json`. Where coverage is thin, Sensitive Data Protection **discovery** data profiles (sensitivity level + data risk level per resource) are the only scalable way to rank thousands of tables — `gcloud dlp` syntax: verify against current docs |
-| 27 | On-prem interior facts | Required by the traversal analysis and the assume-breach premise. | Interview + network documentation, then verify what you can from the cloud side (row 11). Minimum: which interior subnets are reachable from cloud and on which ports; whether interior east-west segmentation exists; which interior services authenticate callers vs trust network position (apply the F6 test per service); where cloud credentials live on interior hosts; what interior egress paths exist and who can reach each |
+| 26 | The data classification map: which resources hold which tier | Without it, TF1 has no multiplier and every finding degrades to generic hygiene. | Preferred: the org's own map (file/spreadsheet/tag taxonomy). Derive and cross-check from labels/tags: `gcloud asset search-all-resources --scope=organizations/ORG_ID --asset-types='storage.googleapis.com/Bucket,bigquery.googleapis.com/Dataset' --query="labels.CLASSIFICATION_KEY:*" --format=json`. Where coverage is thin, Sensitive Data Protection **discovery** data profiles (sensitivity level + data risk level per resource) are the only scalable way to rank thousands of tables — `gcloud dlp` syntax: verify against current docs |
+| 27 | On-prem interior facts | Required by the traversal analysis and the assume-breach premise. | Interview + network documentation, then verify what you can from the cloud side (row 11). Minimum: which interior subnets are reachable from cloud and on which ports; whether interior east-west segmentation exists; which interior services authenticate callers vs trust network position (apply the TF6 test per service); where cloud credentials live on interior hosts; what interior egress paths exist and who can reach each |
 
 ### 2.3 Minimum viable evidence set
 
-Proceed to Phase 2 when you hold **all** of the following; stop and ask when you do not.
+Rows 1–9 are the artifacts that make the review *evidence-derived*. Ask for all of them, and record
+which arrived. **Missing one is never a reason to stop — it is a reason to switch that row's control
+area to interview mode.** The column below states the cost of each absence, which you carry into the
+scope statement and into every finding that area emits.
 
-| Have | Consequence if missing |
+| Have | Cost if missing |
 |---|---|
-| Rows 1–3 (hierarchy, org policy at all three scopes, IAM allow export) | Without these you cannot build a privilege graph or evaluate inheritance. **Stop.** No defensible review exists. |
-| Row 5 (deny policies) **or** an explicit written statement that no deny policies exist | Effective access is unknown in both directions. **Stop** — this is one command; get it. |
-| Row 8 (SA inventory + user-managed key list) | The single highest-yield artifact for offline-credential exfil. **Stop.** |
-| Row 9 (VPC-SC config including dry-run state) **or** a statement that VPC-SC is not deployed | "We have VPC-SC" plus a dry-run-only perimeter is the most common false-positive control in this domain. **Stop.** |
-| Row 26 (classification map), even as a coarse per-project tiering | Without it, run the review but score every unclassified store as CONFIDENTIAL-until-proven-otherwise and open a `DC-` finding per store. Say so in the report's scope statement. |
+| Rows 1–3 (hierarchy, org policy at all three scopes, IAM allow export) | The only rows whose absence also degrades §6: without them the privilege graph is partial, so §6's output is the primitive-hunt list (§6.2) answered from interviews, not a computed closure. Name that limitation; do not skip §6. Ask for the org-policy and hierarchy blocks in §2.5.2 and re-ask the IAM questions per project. |
+| Row 5 (deny policies) **or** an explicit written statement that no deny policies exist | Effective access is unknown in both directions. This is one command — press for it. Absent both, work the IAM Deny question block and treat every deny-dependent remediation as unverified. |
+| Row 8 (SA inventory + user-managed key list) | The single highest-yield artifact for offline-credential exfil. Absent it, work the Identity question block; every `ID-08`/`ID-09` finding is `[INTERVIEW] · REPORTED` and capped at High. |
+| Row 9 (VPC-SC config including dry-run state) **or** a statement that VPC-SC is not deployed | "We have VPC-SC" plus a dry-run-only perimeter is the most common false-positive control in this domain. Absent the config, ask the VPC-SC block and **never** record a perimeter as enforced on a verbal answer. |
+| Row 26 (classification map), even as a coarse per-project tiering | Run the review but score every unclassified store as CONFIDENTIAL-until-proven-otherwise and open a `DC-` finding per store. Say so in the report's scope statement. |
 
-**Proceed with degradation** (interview mode, `[INTERVIEW]` tags) when rows 10–25 are partial. Those
-rows narrow and rank chains; their absence lowers confidence, it does not invalidate the analysis.
+**Proceed with degradation** (interview mode, `[INTERVIEW]` tags per §2.5.1) when rows 10–25 are
+partial. Those rows narrow and rank chains; their absence lowers confidence, it does not invalidate
+the analysis.
 
-**Do not proceed at all** when you hold none of rows 1–9 *and* no one is available to interview.
-Say that, and say which single artifact would unblock the most: the CAI `iam-policy` export.
+**When a row 1–9 artifact cannot be produced, do not stop** — switch that row to interview mode and
+work its question block in §2.5.2. Say so in the scope statement in these words: *"Rows &lt;n&gt; were not
+produced; the corresponding control areas are assessed `[INTERVIEW] · REPORTED`, capped at High per
+§11.1.7, and the privilege graph in §6 is built only from the edge classes the available artifacts
+support — the unbuilt edge classes are listed in Appendix B."*
+
+**Do not proceed at all** only when you hold none of rows 1–9 **and** no one is available to
+interview. Say that, and say which single artifact would unblock the most: the CAI `iam-policy`
+export.
 
 ---
 
@@ -381,7 +401,7 @@ not answers — re-ask naming the specific field.
 **Hybrid link and the on-prem interior**
 1. Which interior subnets can a cloud workload reach today, on which ports, and which cloud subnets can originate that traffic?
 2. Is there interior east-west segmentation between the systems reachable from cloud and the rest of the interior — enforced by what device or policy?
-3. Which interior services reachable from cloud validate a per-request credential, and which authorize because the caller is on the internal network? (Apply the F6 test service by service.)
+3. Which interior services reachable from cloud validate a per-request credential, and which authorize because the caller is on the internal network? (Apply the TF6 test service by service.)
 4. Where do cloud credentials live on interior hosts — SA key files, `gcloud` credentials in home directories, config-management secrets, artifact-store secrets, CI runner secrets?
 5. What sanctioned egress paths exist from the interior (proxy, data diode, media transfer, vendor link, patch mirror), and which of them is reachable from the systems where cloud data lands?
 6. Does on-prem DNS resolve `*.googleapis.com` to the restricted VIP, and does on-prem block direct routes to public Google front-end addresses?
@@ -403,7 +423,8 @@ met; record any criterion you waive, and why, in the scope statement.
    *Exit:* the minimum viable evidence set is satisfied or explicitly waived in writing; every
    supplied requirement has a `SR-` ID and a `test`; the conflict report exists (possibly empty).
 
-2. **Asset & identity inventory** — enumerate data stores by classification tier; enumerate human,
+2. **Asset & identity inventory** — runs §4.2 (asset registers `TM-A1`/`TM-A2`/`TM-A3`) and §4.3
+   (trust-boundary register `TM-B`). Enumerate data stores by classification tier; enumerate human,
    service-account, and federated identities; mark trust boundaries (perimeter edges, the
    cloud↔on-prem link, the internet edge, each WIF-trusted IdP, the CI/CD control plane's boundary
    into each project).
@@ -412,9 +433,9 @@ met; record any criterion you waive, and why, in the scope statement.
    tier and a perimeter-membership value (including the literal value `NONE`); every data-bearing
    resource without a classification has a `DC-` finding ID reserved.
 
-3. **Threat model** — build it per §4: assets, trust boundaries, adversaries
-   with explicit starting positions, attack paths as ordered chains, ATT&CK mapping, detection
-   posture per path.
+3. **Threat model** — runs §4.1 and §4.4–§4.9 (the two registers built in phase 2 are its input):
+   adversaries with explicit starting positions, attack paths as ordered chains, ATT&CK mapping,
+   detection posture per path.
    *Artifact:* `THREATMODEL.md`.
    *Exit:* every adversary has a named starting position that maps to a concrete principal or host in
    `INVENTORY.csv`; every enumerated path has at least one step naming a real permission, rule, or
@@ -460,14 +481,19 @@ met; record any criterion you waive, and why, in the scope statement.
    attack path and to its chain steps; no finding contains a sentence that would be true of an
    arbitrary GCP org.
 
-10. **Remediation roadmap** — sequence the fixes, split quick wins from structural changes, note
-    dependencies (e.g. a PAB rollout depends on the WIF inventory; an egress default-deny depends on
-    the restricted-VIP DNS and route work).
+10. **Remediation roadmap** — runs §11.5. Sequence the fixes, split quick wins from structural
+    changes, note dependencies (e.g. a PAB rollout depends on the WIF inventory; an egress
+    default-deny depends on the restricted-VIP DNS and route work).
     *Artifact:* `ROADMAP.md`.
-    *Exit:* every finding ID appears exactly once in the roadmap; every structural item lists its
-    prerequisite finding IDs; every quick win is executable with the snippet already in `FINDINGS.md`.
+    *Exit:* every finding banded `LOW` or above appears exactly once in the roadmap, except a finding
+    whose remediation is already carried by another row — which names that row in its
+    `Severs which chains` cell; **`INFO` findings never appear** (§11.1.6), and neither does an item
+    that severs no chain and closes no `SR-`/`DC-` finding (§11.5); every structural item lists its
+    prerequisite finding IDs; every quick win is executable with the snippet already in
+    `FINDINGS.md`.
 
-11. **Appendices** — raw evidence used (with collection command and timestamp), the privilege graph,
+11. **Appendices** — runs §11.4.1's appendix table (A–F). Raw evidence used (with collection
+    command and timestamp), the privilege graph,
     the merged requirements ruleset and conflict report, and the consolidated list of every item
     carrying "verify against current docs".
     *Artifact:* `APPENDIX/`.
@@ -505,8 +531,11 @@ against the asset and boundary registers, and its steps are unusable without the
 #### 4.2.1 Data assets — table `TM-A1`
 
 Enumerate from the Cloud Asset Inventory export
-(`gcloud asset export --content-type=resource`, lowercase-hyphenated value — the `UPPER_SNAKE` forms
-are REST-only), not from a service list a human typed. One row per data-bearing resource: GCS bucket,
+(`gcloud asset export --content-type=resource`), not from a service list a human typed.
+**`--content-type` spelling, stated once here and cross-referenced everywhere else in this skill:**
+the gcloud CLI takes the lowercase-hyphenated values `resource`, `iam-policy`, `org-policy`,
+`access-policy`, `os-inventory`, `relationship`; the `UPPER_SNAKE` forms (`RESOURCE`, `IAM_POLICY`, …)
+are the REST enum only and are rejected by the CLI. One row per data-bearing resource: GCS bucket,
 BigQuery dataset, Pub/Sub topic, Cloud SQL instance, Spanner database, Firestore database, Filestore
 instance, Secret Manager secret, Artifact Registry repository, log bucket.
 
@@ -531,7 +560,7 @@ Rules that produce findings directly from this table:
 - `Classification (observed)` ≠ `Classification (claimed)` → finding; treat the **higher** tier as
   true for the rest of the review.
 - Tier ordering for all scoring in this skill: **`CONFIDENTIAL` outranks `NTK`** — rationale in §1,
-  rule F3. The numeric tier weights live in §6.3.2 and are the only set this skill uses.
+  rule TF3. The numeric tier weights live in §6.3.2 and are the only set this skill uses.
 - A row whose `Perimeter` is `NONE` or `dry-run` while `Classification` is `CONFIDENTIAL` or `NTK` →
   finding, path `AP-01`.
 
@@ -562,7 +591,7 @@ data resource. One row each.
 
 | `ID` | Trust relationship | Exact binding / config string | What it confers | Scoping condition observed | Revocation action |
 |---|---|---|---|---|---|
-| `T-wif-*` | WIF pool + provider | `oidc.issuerUri`, `attributeCondition` (CEL, verbatim), `allowed_audiences` | Which external subjects become GCP principals | The literal CEL text — an empty condition means every token the issuer signs is accepted | Delete provider (note: pools/providers are **undeletable-for-30-days**; they undelete) |
+| `T-wif-*` | WIF pool + provider | `oidc.issuerUri`, `attributeCondition` (CEL, verbatim), `allowed_audiences` | Which external subjects become GCP principals | The literal CEL text — an empty condition means every token the issuer signs is accepted | Delete provider (note: pools/providers are pools/providers are **undeletable-for-30-days** in the sense that they can be *undeleted* for 30 days before the deletion becomes permanent) |
 | `T-bind-*` | IAM binding to a federated principal | `principal://…/subject/…`, `principalSet://…/attribute.X/Y`, `principalSet://…/POOL/*` | Roles held by external subjects | `/*` = every identity in the pool | Remove the binding |
 | `T-wfif-*` | Workforce pool | `principal://iam.googleapis.com/locations/global/workforcePools/POOL/subject/…` (no project number), `--session-duration`, `--disable-programmatic-signin` | Console + gcloud for on-prem humans without Cloud Identity accounts | Session duration; 12h ceiling on an admin-capable pool is a finding | Delete provider |
 | `T-cicd-*` | Pipeline → project | Repo/pipeline identifier, runner placement, the SA it assumes, the projects it can deploy to | Deploy-time `actAs` and guardrail mutation | Branch/environment protection; WIF attribute condition if any | Remove the SA's roles or the runner's credential |
@@ -676,7 +705,7 @@ IDs from §4.9.
 | 1 | Authenticate with the stolen refresh token | No session-length limit; no `devicePolicy` on any access level | Cloud Identity session control + 2SV reauth; `T-al-*` with `devicePolicy` set | T1078.004 |
 | 2 | Enumerate the estate | `cloudasset.assets.searchAllResources` held broadly | PAB policy on the principal set; IAM Deny on `cloudasset.googleapis.com/assets.searchAllResources` | T1580, T1087.004 |
 | 3 | Call the data API from a public IP | Perimeter absent, in dry-run, or the service is missing from `restrictedServices` | **Enforced** perimeter over every data-bearing API; verify membership with `gcloud access-context-manager supported-services list` rather than a hardcoded list | T1530, T1213.006 |
-| 4 | Download the objects/rows | `storage.objects.get`, `bigquery.tables.getData` | Deny policy on the read permission outside an authorized principal set | T1537, T1567.002 |
+| 4 | Download the objects/rows | `storage.objects.get`, `bigquery.tables.getData` | Deny policy on the read permission outside an authorized principal set. (`T1567.002` applies only if the read terminates on an endpoint/Workspace surface — `T1567`'s platform list is not IaaS-scoped, so do not cite it for an in-cloud GCP read; see §4.9.) | T1537, T1530 |
 
 **Cheapest severing control:** step 3 — perimeter enforcement. Step 4 denies are per-service and drift.
 
@@ -711,7 +740,7 @@ IDs from §4.9.
 | 1 | Create or select a staging resource | `storage.buckets.create`, `bigquery.datasets.create` | `constraints/gcp.restrictServiceUsage`; project-per-workload so staging cannot be co-located | T1074.002 |
 | 2 | Copy data in | `storage.objects.create`, BigQuery `EXPORT DATA OPTIONS(uri='gs://…')`, `bq extract` | Perimeter must cover **both** `bigquery.googleapis.com` **and** `storage.googleapis.com`; deny `bigquery.tables.export` | T1530, T1074.002 |
 | 3 | Widen access | `storage.buckets.setIamPolicy` / `storage.objects.setIamPolicy` granting `allUsers`/`allAuthenticatedUsers`; or object ACLs where uniform bucket-level access is off | `constraints/storage.publicAccessPrevention` enforced at the org node; `constraints/storage.uniformBucketLevelAccess`; `constraints/iam.managed.allowedPolicyMembers` | T1098.003 |
-| 4 | Read from outside | Public object read; or a **signed URL**, which is a bearer credential no identity-based perimeter rule can express | `constraints/storage.restrictAuthTypes`; deny `iam.serviceAccounts.signBlob`; short TTLs | T1537, T1567.002 |
+| 4 | Read from outside | Public object read; or a **signed URL**, which is a bearer credential no identity-based perimeter rule can express | `constraints/storage.restrictAuthTypes`; deny `iam.serviceAccounts.signBlob`; short TTLs. (`T1567.002` applies only if the read terminates on an endpoint/Workspace surface — `T1567`'s platform list is not IaaS-scoped; see §4.9.) | T1537, T1530 |
 
 #### `AP-05` — Egress via VM external IP or an open egress rule to `0.0.0.0/0`
 
@@ -1027,9 +1056,14 @@ where a name is unverified the row says so and the filter falls back to `service
 Two facts that decide most of this table:
 
 - **Every impersonation and federation event is a Data Access log and is therefore off by default.**
-  `GenerateAccessToken`, `SignJwt`, `SignBlob`, `ExchangeToken` produce nothing until `ADMIN_READ` is
-  enabled on `iam.googleapis.com`, `iamcredentials.googleapis.com` and `sts.googleapis.com`. If the
-  environment has not enabled them, every impersonation path scores as undetected.
+  The permission types split: `ADMIN_READ` covers `GenerateAccessToken` and `SignJwt`; **`DATA_READ`
+  covers `GenerateIdToken`, `SignBlob` and `SignJwt`.** The `auditConfigs` entry must therefore carry
+  **both** `ADMIN_READ` and `DATA_READ` for `iam.googleapis.com` — enabling it for the IAM API also
+  enables it for the Service Account Credentials API, so you do **not** add an
+  `iamcredentials.googleapis.com` entry; that string is the `serviceName` you *filter* on — and both
+  for `sts.googleapis.com` (`ExchangeToken`). An `ADMIN_READ`-only config leaves ID-token minting and
+  blob signing invisible. If the environment has not enabled them, every impersonation path scores as
+  undetected.
 - **These calls are long-running operations**, so one impersonation typically yields two entries
   (start and end). Do not build threshold alerts that count raw entries.
 
@@ -1045,7 +1079,7 @@ protoPayload.serviceName="cloudresourcemanager.googleapis.com"
 protoPayload.methodName:"setIamPolicy"
 ```
 
-`F2` — impersonation / token minting *(requires Data Access `ADMIN_READ` on `iamcredentials.googleapis.com`)*:
+`F2` — impersonation / token minting *(requires Data Access **`ADMIN_READ` and `DATA_READ`** in `auditConfigs` for **`iam.googleapis.com`** — enabling it for the IAM API also enables it for the Service Account Credentials API. `ADMIN_READ` alone covers `GenerateAccessToken` and `SignJwt`; `GenerateIdToken` and `SignBlob` need `DATA_READ`, so an `ADMIN_READ`-only config silently drops ID-token minting — the primitive used to call Cloud Run / IAP / an external verifier as another SA. `serviceName` in the filter below is `iamcredentials.googleapis.com`; the `auditConfigs` entry is not.)*:
 ```
 logName:"cloudaudit.googleapis.com%2Fdata_access"
 protoPayload.serviceName="iamcredentials.googleapis.com"
@@ -1343,7 +1377,10 @@ explicitly — an empty tactic is a statement about this environment, not an omi
 
 ## 5. Control assessment catalog — the reviewer's checklist
 
-Work every one of the twelve control areas below. Each has the same four parts:
+Work all twelve control areas — §5.1 Organization Policy, §5.2 VPC Firewall Policy, §5.3 VPC Service
+Controls, §5.4 IAM (allow), §5.5 IAM Deny, §5.6 Private Service Connect, §5.7 Principal Access
+Boundary, §5.8 Workload Identity Federation, §5.9 Identity, §5.10 Access, §5.11 Break-glass,
+§5.12 Audit logging and detection coverage. Each has the same four parts:
 
 - **Observe** — the enumeration commands and the exact fields to record into the evidence appendix.
 - **Findings tests** — numbered conditions. Each evaluates true/false against recorded evidence. Each carries a finding-ID stub and a default severity.
@@ -1353,17 +1390,18 @@ Work every one of the twelve control areas below. Each has the same four parts:
 **Rules that bind the whole catalog:**
 
 1. **No item may be closed with a platitude.** Every item produces either a finding with a resource name in it, or the literal sentence `Assessed, no finding: <control> is <observed value> at <node>, which satisfies <test IDs>.` A control area with neither is an evidence gap, and is reported as one.
-2. **Finding IDs** use the prefixes defined in §11.2.1 — `OP-`, `FW-`, `SC-`, `IA-`, `DN-`, `PS-`, `PB-`, `WI-`, `ID-`, `AX-`, `BG-`, `LG-`. Number findings sequentially within a prefix in the order you emit them; the numbers in this catalog are **test** numbers, not emitted finding numbers — record both (`IA-07 / test IA-02`).
+2. **Finding IDs** use the twenty-three prefixes in the §11.2.1 table — that table is the whole vocabulary, and no prefix outside it may be emitted. §5's twelve control areas emit `OP-`, `FW-`, `SC-`, `IA-`, `DN-`, `PS-`, `PB-`, `WI-`, `ID-`, `AX-`, `BG-`, `LG-`; §6 emits `IM-`; §7 emits `NW-`, `CE-`, `CD-`; §8 emits `DP-` plus the area prefixes routed in §11.2.1; §9 emits `HI-`; and `CH-`, `SR-`, `DC-`, `DRIFT-`, `VD-` are cross-cutting. Number findings sequentially within a prefix in the order you emit them; the numbers in this catalog are **test** numbers, not emitted finding numbers — record both (`IA-07 / test IA-02`).
 3. **Default severity** is a starting point, adjusted by the rubric in §11.1. Apply these two adjustments here: **+1 level** if the affected resource holds CONFIDENTIAL or NTK data *and* no step in the chain produces an audit-log entry that is currently enabled; **−1 level** only if you verified a compensating control by evidence, and you name it in the finding.
 4. **`AP-nn` refers to the attack-path catalog in §4.6** (`AP-01`–`AP-13` and their lettered variants). Never mint a new `AP-nn` here: if a control area exposes a path the catalog does not carry, add it to §4.6 first, then cite it.
 5. **Doc host.** Every Google doc URL you cite or fetch must be `https://docs.cloud.google.com/...`. `cloud.google.com/...` 301-redirects and breaks fetchers that do not follow cross-host redirects.
 6. **Unverified identifiers.** Where this catalog marks an identifier `(verify against current docs)`, do not assert it in a finding or a remediation snippet until you have confirmed it against the live documentation. Record every such item in the "verify against docs" appendix.
+7. **One config fact, one finding.** Several catalog areas test the same object from different angles: access levels in §5.3 (`SC-18`, `SC-20`, `SC-21`) and §5.10 (`AX-01`, `AX-03`, `AX-04`); the private-vs-restricted VIP in §5.3 (`SC-28`) and §7.3.4 (`LM-69`); PSC bundles in §5.6 (`PS-01`, `PS-02`) and §7.3.5; perimeter bridges in §5.3 (`SC-23`) and §8.6 (`ISO-42`). Where two tests fire on the **same field of the same resource**, emit **one** finding, under the area whose *Remediation* block carries the snippet that fixes it, and cite the second test in that finding's `Misconfiguration` line as `also test <ID>`. Never emit two findings, two severities, or two roadmap rows for one edit. This does **not** apply to a supplied `SR-` rule that duplicates a baseline check — §10.1 step 6 deliberately assesses those twice, once as `SR-` and once as the baseline finding.
 
 ---
 
 ### 5.1 Organization Policy
 
-#### Observe
+#### OP — Observe
 
 1. Record the organization's creation time. Organizations created **on or after 2024-05-03** have the seven-constraint security baseline enforced by default; on those orgs an *absent* baseline constraint means someone deleted it, which is a finding in its own right, not a gap.
    ```bash
@@ -1376,18 +1414,19 @@ Work every one of the twelve control areas below. Each has the same four parts:
    gcloud org-policies list --project=PROJECT_ID --format=json
    gcloud org-policies list-custom-constraints --organization=ORG_ID --format=json
    gcloud org-policies describe CONSTRAINT --organization=ORG_ID --format=json
+   gcloud org-policies describe CONSTRAINT --effective --project=PROJECT_ID --format=json
    ```
 3. Compute the **effective** policy per constraint across the hierarchy. Do not reason from the org-level policy alone — a child node silently supersedes its parent unless `inheritFromParent: true`.
    ```bash
    gcloud asset analyze-org-policies --constraint=constraints/CONSTRAINT --scope=organizations/ORG_ID --format=json
    ```
-   Both `--constraint` and `--scope` are required. An `--effective` flag on `gcloud org-policies describe` is unconfirmed (verify against current docs); route effectiveness through `analyze-org-policies`, which is confirmed.
+   Both `--constraint` and `--scope` are required on `analyze-org-policies`. `gcloud org-policies describe CONSTRAINT --effective` is also available and is the cheapest per-node effective read — its SYNOPSIS is `(--folder=FOLDER_ID | --organization=ORGANIZATION_ID | --project=PROJECT_ID) [--effective]`. Use `--effective --project=PROJECT_ID` on every project holding CONFIDENTIAL/NTK data, and `analyze-org-policies` when you need the whole-hierarchy picture in one call. A `describe` without `--effective` returns the policy **set at that node**, which is exactly what test OP-03 exists to catch — never verify a fix with it.
 4. For every policy record: node, tier (**managed** `SERVICE.managed.NAME` vs **legacy managed** `SERVICE.NAME` vs **custom** `custom.NAME`), `spec.rules[]`, `spec.inheritFromParent`, `spec.reset`, every `spec.rules[].condition.expression`, and whether `dryRunSpec` is populated. Managed and legacy constraints of the same name are **not equivalent** — managed constraints check violations only during create/modify API requests, legacy policies could be enforced at other stages. Setting the managed twin does not retire the legacy one; Google's migration path is to run both.
 5. For every conditional rule, extract the tag key/value in `resource.matchTag(...)` / `resource.matchTagId(...)` / `resource.hasTagKey(...)` and then enumerate who can write that tag value (`roles/resourcemanager.tagAdmin`, `roles/resourcemanager.tagUser` bindings on the tag key and on the target projects). **Whoever can attach the tag value can grant themselves the exception.**
 6. Record every holder of `orgpolicy.policy.set`, `orgpolicy.policies.create|update|delete`, and `orgpolicy.customConstraints.*` — via `roles/orgpolicy.policyAdmin` (org-level role only), via `roles/owner` at the org node, and via any custom role. Note that `roles/resourcemanager.organizationAdmin` holds only `orgpolicy.policy.get` / `orgpolicy.policies.list` / `orgpolicy.constraints.list` — it can read org policy but not set it. There is **no** `orgpolicy.policies.get` permission; the getter is `orgpolicy.policy.get`.
 7. Record which Terraform resource type manages each policy: `google_org_policy_policy` / `google_org_policy_custom_constraint` (v2, current) vs `google_organization_policy` / `google_project_organization_policy` / `google_folder_organization_policy` (v1, superseded).
 
-#### Findings tests
+#### OP — Findings tests
 
 Constraint tiers used below refer to the **A/B/C** marker in the reference table. Tier A → default **CRITICAL**, tier B → **HIGH**, tier C → **MEDIUM**.
 
@@ -1408,7 +1447,7 @@ Constraint tiers used below refer to the **A/B/C** marker in the reference table
 15. **OP-15 — control-plane escalation feed.** Count and name every principal with `orgpolicy.policy.set` at any node, and every principal with `roles/owner` at the org node. Each becomes a **Guardrail-mutate** node in the privilege graph (see §6). → **HIGH** for any holder outside the named guardrail-admin group; **CRITICAL** if the holder is also reachable via an impersonation or group-write edge. Flag every `roles/orgpolicy.policyAdmin` binding at org scope that carries no IAM condition.
 16. **OP-16 — two-step chain.** For each tier A constraint, record whether disabling it is a *precursor* step rather than an end state: turning off key creation → mint a key; turning off `constraints/storage.publicAccessPrevention` → stage data publicly; turning off `constraints/iam.allowedPolicyMemberDomains` → grant an external principal a role. Emit these as chains in §11.3, not as two unrelated findings. → severity of the terminating step.
 
-#### Constraint reference table
+#### OP — Constraint reference table
 
 Tier: **A** = enforce at the org node, no exceptions without a named, ticketed, time-bounded justification. **B** = enforce at the org node, project exceptions permitted with documentation. **C** = enforce where the named condition applies.
 
@@ -1434,15 +1473,16 @@ Tier: **A** = enforce at the org node, no exceptions without a named, ticketed, 
 | **B** `constraints/storage.restrictAuthTypes` | list | `in:ALL_HMAC_SIGNED_REQUESTS` denied | HMAC keys are S3-compatible static credentials usable from any S3 client, outside SA-key controls and outside IAM token telemetry. Existing keys stop working and cannot be reactivated. | org |
 | **B** `constraints/storage.secureHttpTransport` | boolean | `enforce: true` | Denies unencrypted HTTP access to Cloud Storage. | org |
 | **B** `constraints/compute.vmExternalIpAccess` | legacy, **list** | org-wide `denyAll` / `allValues: DENY`; per-instance `allowedValues: [projects/P/zones/Z/instances/I]` for named exceptions (never both `allowedValues` and `deniedValues` in one policy) | AP-05: the primary VM egress door. Forces a compromised VM to egress via a logged NAT/proxy path. Managed twin `constraints/compute.managed.vmExternalIpAccess` is **boolean** and was Preview as of 2025-09-09 (verify GA against current docs). | org |
+| **B** `constraints/compute.vmCanIpForward` | legacy, **list** (instance URIs) | org-wide `denyAll` / `allValues: DENY`; per-instance `allowedValues: [projects/P/zones/Z/instances/I]` for the named router/NVA exceptions only | IP forwarding turns a VM into a router — the building block of an unlogged transit path around VPC egress controls and around any east-west rule keyed on the workload's own tag. Managed twin `constraints/compute.managed.vmCanIpForward` is **boolean**, not a list (see OP-08); enumerate both spellings before asserting "not enforced" (OP-07). | org |
 | **B** `constraints/compute.restrictCloudNATUsage` | legacy, list | allow only the named egress subnets; **if neither `allowedValues` nor `deniedValues` is set, everything is allowed** | Cloud NAT is the egress path that survives `vmExternalIpAccess`. Restricting it is what actually closes internet egress for private VMs. | org |
 | **B** `constraints/compute.restrictLoadBalancerCreationForTypes` | legacy, list | `deniedValues: [in:EXTERNAL]` | An external LB publishes an internal service to the internet without ever touching an external IP on a VM. | org |
 | **B** `constraints/compute.disableInternetNetworkEndpointGroup` | boolean | `enforce: true` | Internet NEGs let a load balancer forward to an arbitrary external FQDN/IP — a fully Google-managed, allow-list-friendly exfil relay. | org |
 | **B** `constraints/compute.disableAllIpv6` | boolean | `enforce: true` unless IPv6 is a documented requirement | IPv6 is the classic egress blind spot: firewall rules and NAT logging built for IPv4 do not cover it. Finer-grained alternatives: `constraints/compute.disableVpcExternalIpv6`, `constraints/compute.disableVpcInternalIpv6`, `constraints/compute.disableHybridCloudIpv6`. | org |
-| **B** `constraints/compute.restrictProtocolForwardingCreationForTypes` | legacy list / managed list | `INTERNAL` only (`deniedValues: [EXTERNAL]`, or managed `denyAll: "true"` for external) | Protocol forwarding to an external IP is a raw-IP tunnel out of the VPC. Managed form is baseline-enforced on orgs ≥ 2024-05-03. | org |
+| **B** `constraints/compute.restrictProtocolForwardingCreationForTypes` | legacy list / managed list | `deniedValues: [EXTERNAL]` (legacy) or managed `parameters.deniedValues: ["EXTERNAL"]`. **Do not use `denyAll: "true"` here** — it is unqualified and denies *internal* protocol forwarding too, which the post-2024-05-03 baseline ("protocol forwarding for internal IP addresses only") deliberately permits | Protocol forwarding to an external IP is a raw-IP tunnel out of the VPC. Managed form is baseline-enforced on orgs ≥ 2024-05-03. | org |
 | **B** `constraints/compute.restrictVpcPeering` | legacy, list | `under:organizations/ORG_ID` only | Peering a sensitive VPC to an attacker-controlled VPC is a full private-plane data bridge with no internet-egress logging. | org |
 | **B** `constraints/compute.restrictSharedVpcHostProjects` / `constraints/compute.restrictSharedVpcSubnetworks` | legacy, list | the named host projects / the named subnets | Stops a rogue service project joining a trusted network or attaching workloads into a trusted subnet. | org / folder |
 | **B** `constraints/compute.restrictDedicatedInterconnectUsage` / `constraints/compute.restrictPartnerInterconnectUsage` / `constraints/compute.restrictVpnPeerIPs` | list each | the named networks / the named peer IPs | AP-06/AP-12: hybrid links are egress paths that bypass every internet-facing control. | org |
-| **B** `constraints/compute.restrictPrivateServiceConnectConsumer` / `constraints/compute.restrictPrivateServiceConnectProducer` / `constraints/compute.disablePrivateServiceConnectCreationForConsumers` | list each | producer/consumer restricted to `under:organizations/ORG_ID`; consumer creation limited to `GOOGLE_APIS` | AP-06: an unconstrained PSC consumer endpoint is a private egress tunnel to an attacker-run service attachment. Hierarchy value format for the `restrict*` pair (verify against current docs). | org |
+| **B** `constraints/compute.restrictPrivateServiceConnectConsumer` / `constraints/compute.restrictPrivateServiceConnectProducer` / `constraints/compute.disablePrivateServiceConnectCreationForConsumers` | list each | Producer/consumer `restrict*` pair: `under:organizations/ORG_ID`. For `disablePrivateServiceConnectCreationForConsumers`, note the polarity: the constraint is a **denylist of endpoint types**, so to permit Google-APIs endpoints only, set `deniedValues: [SERVICE_PRODUCERS]` — do **not** write `allowedValues: [GOOGLE_APIS]`, which disables the Google-APIs endpoints and leaves the service-producer tunnel (LM-77) open. §5.6's remediation snippet shows the correct shape. Confirm the polarity against a test project with `gcloud org-policies describe constraints/compute.disablePrivateServiceConnectCreationForConsumers --effective --project=P` before org-wide rollout | AP-06: an unconstrained PSC consumer endpoint is a private egress tunnel to an attacker-run service attachment. Hierarchy value format for the `restrict*` pair (verify against current docs). | org |
 | **B** `constraints/compute.requireOsLogin` | legacy, boolean | `enforce: true` | Forces IAM-governed, audited SSH and removes metadata SSH keys as an unlogged persistence and data-pull channel. Managed twin `constraints/compute.managed.requireOsLogin` also blocks disabling at project/instance level (Preview as of 2025-09-09 — verify GA). | org |
 | **B** `constraints/compute.disableSerialPortAccess` | legacy, boolean | `enforce: true` | Serial console is an out-of-band shell that bypasses VPC firewalls, IAP, and IP allow-lists entirely. Managed twin is metadata-key-scoped (`serial-port-enable`). Pair with `constraints/compute.disableGlobalSerialPortAccess`. | org |
 | **B** `constraints/compute.disableInstanceDataAccessApis` | boolean | `enforce: true` | Disables `GetSerialPortOutput` and `GetScreenshot` — both read data **out of a VM through the control plane**, bypassing every network control. | org |
@@ -1471,7 +1511,7 @@ Tier: **A** = enforce at the org node, no exceptions without a named, ticketed, 
 
 Constraints marked unverified and therefore **not** to be asserted without checking: `constraints/storage.managed.publicAccessPrevention`, `constraints/storage.managed.uniformBucketLevelAccess`, `constraints/bigquery.managed.*`, any predefined `constraints/dataproc.*` (Dataproc is custom-constraints-only, on `dataproc.googleapis.com/Cluster` with `CREATE`/`UPDATE`) — verify against current docs.
 
-#### Exfil scenario
+#### OP — Exfil scenario
 
 Org policy is the **precursor layer** for most chains rather than the terminal control. Concretely:
 
@@ -1484,7 +1524,7 @@ Org policy is the **precursor layer** for most chains rather than the terminal c
 
 Org policy does **not** block a principal who already holds the permission at a node where the constraint is not attached, and it does not apply retroactively for `constraints/sql.restrictPublicIp`, `constraints/sql.restrictAuthorizedNetworks`, or the CMEK constraints. Never report an org policy as closing a path without checking existing resources.
 
-#### Remediation
+#### OP — Remediation
 
 Set a boolean constraint at the org node, with an explicit exception at one folder:
 
@@ -1618,7 +1658,7 @@ resource "google_org_policy_custom_constraint" "bucket_pap_ipfilter" {
 
 ### 5.2 VPC Firewall Policy
 
-#### Observe
+#### FW — Observe
 
 1. **Collect all four surfaces.** `gcloud compute firewall-rules list` shows only classic VPC rules and will miss every hierarchical and network-policy rule. That single mistake invalidates most firewall reviews.
    ```bash
@@ -1648,7 +1688,7 @@ resource "google_org_policy_custom_constraint" "bucket_pap_ipfilter" {
 6. **Record how each policy was created.** Console-created policies get predefined rules at priorities 1000–1005 (RFC1918 `goto_next` egress/ingress; ingress deny `iplist-tor-exit-nodes`, `iplist-known-malicious-ips`; egress deny `iplist-known-malicious-ips`; ingress deny geolocations `CU, IR, KP, SY, XC, XD`). Policies created by gcloud, the API, or Terraform get **only** the four immutable lowest-priority `goto_next` rules at 2147483644–2147483647. Do not assume the threat-intel and geo denies exist.
 7. **Record secure-tag inventory and who can bind it**: `gcloud resource-manager tags keys list --parent=organizations/ORG_ID`, values per key, bindings per instance, and the holders of `roles/resourcemanager.tagAdmin` and `roles/resourcemanager.tagUser`. Record separately every principal holding `compute.instances.setTags` (in `roles/compute.instanceAdmin.v1`).
 
-#### Findings tests
+#### FW — Findings tests
 
 1. **FW-01 — no default-deny egress.** In the effective rule set for a NIC in a subnet hosting CONFIDENTIAL or NTK workloads, there is no EGRESS `deny` rule matching `0.0.0.0/0`, or there is one but an EGRESS `allow` to `0.0.0.0/0` sits at a numerically lower priority. → **CRITICAL**. Absent any explicit rule, the implied allow-egress applies and everything leaves.
 2. **FW-02 — IPv6 hole.** An EGRESS deny exists for `0.0.0.0/0` but not for `::/0`, and `constraints/compute.disableAllIpv6` is not enforced on the project. → **HIGH**.
@@ -1671,13 +1711,13 @@ resource "google_org_policy_custom_constraint" "bucket_pap_ipfilter" {
 15. **FW-15 — internal-IP channels not covered.** The egress posture is `deny 0.0.0.0/0` plus an `allow` for RFC1918, and PSC endpoints, peered VPCs, or interconnect destinations sit inside that RFC1918 allow. → **HIGH**; the "default-deny" does not cover the private egress channels. Cross-reference §5.6.
 16. **FW-16 — packet mirroring as an exfil path.** Any principal outside the network-admin group holds `roles/compute.packetMirroringAdmin` or `roles/compute.packetMirroringUser`, or a mirroring policy exists whose collector is outside the security project. → **HIGH**. Mirroring clones production traffic to a collector with **no egress firewall rule from the victim VM**.
 
-#### Exfil scenario
+#### FW — Exfil scenario
 
 Firewall policy is the control for **AP-05** (egress via VM external IP or an open egress rule to `0.0.0.0/0`) and the first hop of **AP-12** (compromised cloud workload → interconnect → flat interior). It is *not* a control for **AP-01**, **AP-03**, or **AP-07** — Google API calls to `storage.googleapis.com` from inside the VPC look like ordinary allowed egress; only VPC Service Controls plus the restricted VIP constrain those. Say this explicitly in the report so nobody counts the firewall twice.
 
 The flat-VPC finding (FW-09) is the cloud-side instance of the same soft-interior problem the on-prem network has: it converts one compromised workload into reachability across the whole environment, which is what turns a single-service compromise into **AP-11** and **AP-12**. Neither Cloud NGFW Enterprise nor Secure Web Proxy is data-loss prevention: NGFW Enterprise gives IDS/IPS, URL filtering and TLS inspection; SWP gives URL and identity-based proxy policy. Neither classifies exfiltrated content. Do not present either as an exfil control for Google-API-shaped exfil.
 
-#### Remediation
+#### FW — Remediation
 
 Default-deny egress with a restricted-VIP allow-list, in a **network** firewall policy, plus the enforcement-order fix that makes it actually win:
 
@@ -1812,7 +1852,7 @@ Quota ceilings to respect when designing: 256 source/target secure tags per poli
 
 This is the primary GCP exfiltration control. Assess it harder than anything else in the catalog.
 
-#### Observe
+#### SC — Observe
 
 1. Enumerate access policies. There is exactly **one** organization-level policy permitted, and up to **50** folder/project-scoped policies.
    ```bash
@@ -1844,7 +1884,7 @@ This is the primary GCP exfiltration control. Assess it harder than anything els
 7. Record who can mutate the perimeter: every binding of `roles/accesscontextmanager.policyAdmin`, `roles/accesscontextmanager.policyEditor`, `roles/accesscontextmanager.admin`, `roles/accesscontextmanager.editor`, `roles/accesscontextmanager.gcpAccessAdmin`, **and every `roles/owner` / `roles/editor` binding at the organization node** (see test SC-24).
 8. Record the IaC shape: which Terraform resources manage perimeters, whether `..._service_perimeters` (plural) or `..._access_levels` (plural) appear anywhere, and whether `lifecycle { ignore_changes = ... }` blocks are present where required.
 
-#### Findings tests
+#### SC — Findings tests
 
 1. **SC-01 — project in no perimeter.** A project holding CONFIDENTIAL or NTK data does not appear (by project **number**) in `status.resources` of any `PERIMETER_TYPE_REGULAR` perimeter. → **CRITICAL**. A project can belong to only one regular perimeter across all policies, so this is unambiguous.
 2. **SC-02 — dry-run masquerading as protection.** `useExplicitDryRunSpec: true` **and** `status` is absent, or `status.restrictedServices` is empty, while `spec` carries a rich configuration. The perimeter enforces nothing. → **CRITICAL**. Terraform tell: `use_explicit_dry_run_spec = true` with an unset or empty `status` block.
@@ -1906,7 +1946,7 @@ This is the primary GCP exfiltration control. Assess it harder than anything els
 34. **SC-34 — deprecated IaC resources.** The repo uses `google_access_context_manager_ingress_policy` or `google_access_context_manager_egress_policy` (no `service_perimeter_` infix). Both are deprecated in favour of `..._service_perimeter_ingress_policy` / `..._egress_policy`, and their legacy argument shapes do not resemble the real rule schema. → **MEDIUM**; a review rule matching only the short names both misses live config and matches dead config.
 35. **SC-35 — quota pressure.** Ingress+egress rule attributes approaching **6,000 per perimeter config** (counted separately for enforced and dry-run), identity groups approaching **1,000**, VPC networks approaching **500** per policy, or perimeters approaching **10,000** per policy (bridges count). → **LOW–MEDIUM**; matters because hitting a limit forces someone to widen rules rather than add them.
 
-#### Exfil scenario
+#### SC — Exfil scenario
 
 VPC-SC is the control that should terminate **AP-01** (stolen credential used against a data API from outside the perimeter) and **AP-07** (BigQuery/Storage export or copy into an attacker-controlled external project). It is also the only control that survives a full IAM compromise inside a project, which is why **AP-13** targets it directly: Access Context Manager write access is equivalent to turning the control off, and org-level `roles/owner`/`roles/editor` carries that write access.
 
@@ -1914,7 +1954,7 @@ What it does **not** cover, and must never be credited with: it is explicitly "n
 
 For hybrid access (**AP-12** in the on-prem→cloud direction), an access level based on `ipSubnetworks` alone is a network-position-only control: anything that can route packets from the corporate LAN — a compromised laptop, a rogue VM on the same VLAN, a partner site-to-site VPN — inherits it. Google's own guidance under `NO_MATCHING_ACCESS_LEVEL` is to prefer an **ingress rule** over an access level, because the ingress rule can name identities. Note the asymmetry that forces bad designs: access-level `members[]` supports only `user:` and `serviceAccount:` and explicitly **does not support groups**, while ingress/egress `identities[]` **does** support `group:` plus workforce/workload pool and agent principals — which access levels cannot express at all.
 
-#### Remediation
+#### SC — Remediation
 
 Bring a perimeter to enforced with a complete restricted-services list:
 
@@ -2097,7 +2137,7 @@ If User ADCs are in use, the provider needs `billing_project` set and `user_proj
 
 Every finding in this area must name the **privilege-graph edge type** it creates, using the edge vocabulary from §6: *Impersonate*, *Deploy-as (actAs)*, *Key-mint*, *Grant-self*, *Role-mutate*, *Group-write*, *Guardrail-mutate*, *Read-data*. A finding that says "over-privileged" without naming the edge is not usable by the reachability analysis and is not acceptable output.
 
-#### Observe
+#### IA — Observe
 
 1. Pull allow policies at **every** node, including resource-level ones. Resource-level bindings are routinely missed and are where impersonation grants hide.
    ```bash
@@ -2125,7 +2165,7 @@ Every finding in this area must name the **privilege-graph edge type** it create
    gcloud asset export --organization=ORG_ID --content-type=iam-policy \
      --output-path=gs://EVIDENCE_BUCKET/iam-policy.json
    ```
-   `--content-type` on the **gcloud CLI** takes lowercase-hyphenated values (`resource`, `iam-policy`, `org-policy`, `access-policy`, `os-inventory`, `relationship`); the `UPPER_SNAKE` forms are the REST enum only and will fail on the CLI.
+   (`--content-type` spelling: see §4.2.1 — the gcloud CLI takes the lowercase-hyphenated values only.)
 3. Enumerate custom roles and their contents at org and project scope, and which principals hold each:
    ```bash
    gcloud iam roles list --organization=ORG_ID --format=json
@@ -2151,7 +2191,7 @@ Every finding in this area must name the **privilege-graph edge type** it create
    ```
    Role recommendations are usage-driven least-privilege hints. They do not reason about impersonation chains, do not evaluate deny or PAB, and will not flag an unused-but-catastrophic grant as an exfil risk beyond "unused".
 
-#### Findings tests
+#### IA — Findings tests
 
 1. **IA-01 — primitive roles at org or folder.** `roles/owner`, `roles/editor`, or `roles/viewer` bound at an organization or folder node. → **CRITICAL** for owner/editor, **HIGH** for viewer on a folder containing CONFIDENTIAL/NTK. Edges: *Grant-self* (owner/editor carry `resourcemanager.*.setIamPolicy` down the subtree), *Guardrail-mutate* (both carry the ACM perimeter mutation permissions — see SC-24), *Read-data* (viewer reads across the subtree).
 2. **IA-02 — project-level impersonation.** `roles/iam.serviceAccountTokenCreator`, `roles/iam.serviceAccountUser`, `roles/iam.serviceAccountOpenIdTokenCreator`, or `roles/iam.workloadIdentityUser` bound at **project, folder, or org** scope rather than on a specific service-account resource. → **CRITICAL**. Edge: *Impersonate* to **every** SA in scope, including the default compute SA. State plainly in the finding that this **cannot** be narrowed with an IAM Condition: `iam.googleapis.com` is not among the services supporting `resource.service` conditions, so conditional TokenCreator bindings are unimplementable; the only scoping mechanism is binding the role on the individual service account, whose "lowest-level resource" is Service Account.
@@ -2174,13 +2214,13 @@ Every finding in this area must name the **privilege-graph edge type** it create
 19. **IA-19 — unused Tier-0 grants.** A role recommendation marks a binding unused for 90 days **and** the role appears in IA-01/02/05/06/12. → **MEDIUM** on its own, but it is the cheapest remediation in the whole report: no one will notice the removal.
 20. **IA-20 — blind spots not stated.** The review asserts complete coverage of effective access using Policy Analyzer output alone. → report as an **evidence gap**, naming the five exclusions (deny, PAB, GKE RBAC, GCS ACLs, GCS PAP) and how each was covered instead.
 
-#### Exfil scenario
+#### IA — Exfil scenario
 
 This area supplies the *middle* of nearly every chain. **AP-03** in its canonical form: a group member holds project-level `roles/iam.serviceAccountTokenCreator` (IA-02) → `GenerateAccessToken` on a data-tier SA → `bigquery.tables.getData` on a CONFIDENTIAL dataset → `EXPORT DATA` to a bucket → out. **AP-11** substitutes IA-04, IA-07, or IA-08 for the first hop, none of which changes a project IAM policy in a way a diff-based review would catch. **AP-04** is IA-09 plus a staging step. **AP-07** is IA-10 plus a copy job.
 
 The point to make in the report: a perfect VPC-SC perimeter around a reachable admin identity is not a control. Every finding here should carry the specific SA or group it reaches and the classification tier it terminates at, so the reachability analysis can rank it.
 
-#### Remediation
+#### IA — Remediation
 
 Move impersonation from the project to the specific service account — the only scoping that works, since conditions are unavailable on `iam.googleapis.com`:
 
@@ -2249,7 +2289,7 @@ Every finding in this area that names a Tier-0 permission must be paired with th
 
 Deny policies are the un-overridable backstop: **IAM always checks relevant deny policies before allow policies**, no allow policy anywhere can override a deny, and denies inherit down the hierarchy. Attach them at org or folder so a project owner cannot undo them.
 
-#### Observe
+#### DN — Observe
 
 1. Enumerate deny policies at **every** attachment point. There are only three kinds of attachment point — organizations, folders, projects. Service accounts, buckets, and other resources **cannot** carry a deny policy.
    ```bash
@@ -2268,11 +2308,11 @@ Deny policies are the un-overridable backstop: **IAM always checks relevant deny
 4. Record counts against the limits: **500 deny policies per resource**, and **500 deny rules total across them**.
 5. Verify each `deniedPermissions` string against the deny-supported permissions list before treating the rule as effective.
 
-#### Findings tests
+#### DN — Findings tests
 
 1. **DN-01 — no backstop at all.** No deny policy is attached at the organization node. → **HIGH**. Every removable allow-policy control in this report is one `setIamPolicy` away from being undone.
 2. **DN-02 — recommended rule missing.** Any row of the recommended-rules table below has no equivalent rule at the stated attachment node. → severity per the row.
-3. **DN-03 — invalid permission group.** A rule uses `iam.googleapis.com/serviceAccounts.*`. That wildcard group **does not exist** (only `serviceAccountKeys.*` does among the IAM SA families), so the policy fails to apply or silently fails to cover impersonation. → **CRITICAL**, because it produces a documented control that does nothing. The impersonation permissions must be enumerated individually. Confirmed-valid groups include `iam.googleapis.com/serviceAccountKeys.*`, `iam.googleapis.com/workloadIdentityPools.*`, `iam.googleapis.com/workforcePools.*`, `iam.googleapis.com/principalaccessboundarypolicies.*`, `iam.googleapis.com/oauthClients.*`, `cloudresourcemanager.googleapis.com/projects.*`, `cloudresourcemanager.googleapis.com/folders.*`, `storage.googleapis.com/objects.*`, and the whole `accesscontextmanager.googleapis.com/*.*` family. `iam.googleapis.com/roles.*` and `iam.googleapis.com/*.*` are **not** valid groups.
+3. **DN-03 — invalid permission group.** A rule uses `iam.googleapis.com/serviceAccounts.*`. That wildcard group **does not exist** (only `serviceAccountKeys.*` does among the IAM SA families), so the policy fails to apply or silently fails to cover impersonation. → **CRITICAL**, because it produces a documented control that does nothing. The impersonation permissions must be enumerated individually. Deny policies support three group **forms** — `SERVICE_FQDN/RESOURCE.*` (every permission on a resource type), `SERVICE_FQDN/*.*` (every permission for a service), and `SERVICE_FQDN/*.VERB` (every permission for a service ending in that verb). **Support is per service, not universal**, so the form existing does not mean the service accepts it: check every group string against the deny-supported-permissions table before shipping the rule. Confirmed **present**: `iam.googleapis.com/serviceAccountKeys.*`, `iam.googleapis.com/workloadIdentityPools.*`, `iam.googleapis.com/workforcePools.*`, `iam.googleapis.com/principalaccessboundarypolicies.*`, `iam.googleapis.com/oauthClients.*`, `cloudresourcemanager.googleapis.com/projects.*`, `cloudresourcemanager.googleapis.com/folders.*`, `storage.googleapis.com/objects.*`. Confirmed **absent**: `iam.googleapis.com/serviceAccounts.*`, `iam.googleapis.com/roles.*`, `iam.googleapis.com/*.*`. Not confirmed either way, and therefore to be checked before use rather than asserted: the `accesscontextmanager.googleapis.com/{servicePerimeters,accessLevels,policies,authorizedOrgsDescs,gcpUserAccessBindings}.*` families, `logging.googleapis.com/exclusions.*`, `iam.googleapis.com/workloadIdentityPoolProviders.*`, `iam.googleapis.com/workforcePoolProviders.*`, `iam.googleapis.com/oauthClientCredentials.*` (verify against current docs) — where the check fails, enumerate the individual permissions instead, as rule #4 already does. Write the same group string in DN-03 and in the recommended-rules table below: a reviewer grepping this skill for a valid group must get one answer, not two.
 4. **DN-04 — v1 permission format.** A rule names a permission in allow-policy format (`iam.roles.delete`, `resourcemanager.projects.setIamPolicy`, `accesscontextmanager.servicePerimeters.delete`) instead of the v2 `SERVICE_FQDN/RESOURCE.ACTION` format, or uses `resourcemanager.googleapis.com/...` instead of **`cloudresourcemanager.googleapis.com/...`**. → **CRITICAL**; the rule matches nothing.
 5. **DN-05 — invalid service prefix.** A rule names `iamcredentials.googleapis.com/...`. No such deny permission exists and none is needed: impersonation is authorised by the `iam.googleapis.com/serviceAccounts.*` permission checked **on the service-account resource**. → **CRITICAL**; the rule is invalid.
 6. **DN-06 — invalid denial condition.** A `denialCondition.expression` uses anything other than `resource.matchTag(...)` / `resource.matchTagId(...)`. Denial conditions **only recognise resource tag functions** — no `request.time`, no `resource.name`, no `resource.type`, no `request.auth.*`, no IP attributes. → **HIGH**. Any time-boxed or resource-name-scoped deny rule is unimplementable; the only scoping levers are the **attachment node**, **`exceptionPrincipals`**, and **project/folder tags**. Record the fail-closed semantics as a design consequence: if the condition evaluates true **or cannot be evaluated**, the deny applies.
@@ -2283,7 +2323,7 @@ Deny policies are the un-overridable backstop: **IAM always checks relevant deny
 11. **DN-11 — data-read deny absent on NTK.** No deny rule restricts `storage.googleapis.com/objects.get`, `objects.list`, `bigquery.googleapis.com/tables.getData`, or `tables.export` on the folder holding NTK projects. → **HIGH**.
 12. **DN-12 — limit pressure.** Deny rules at a node approach 500, or policies approach 500. → **LOW–MEDIUM**; note it, because the fix people reach for is merging rules and widening exceptions.
 
-#### Recommended deny rules
+#### DN — Recommended deny rules
 
 All permissions below were confirmed deniable. Denied principal set `principalSet://goog/public:all` means "everyone", narrowed by `exceptionPrincipals`. Principal formats seen in official examples: `principalSet://goog/public:all`, `principalSet://goog/group/GROUP_EMAIL`, `principal://goog/subject/USER_EMAIL`.
 
@@ -2297,9 +2337,9 @@ All permissions below were confirmed deniable. Denied principal set `principalSe
 | 6 | `iam.googleapis.com/roles.create`, `iam.googleapis.com/roles.update`, `iam.googleapis.com/roles.delete`, `iam.googleapis.com/roles.undelete` | `principalSet://goog/public:all` | `principalSet://goog/group/grp-iam-admins@example.com` | **organization** |
 | 7 | `storage.googleapis.com/objects.get`, `storage.googleapis.com/objects.list`, `bigquery.googleapis.com/tables.getData`, `bigquery.googleapis.com/tables.export`, `bigquery.googleapis.com/datasets.setIamPolicy`, `bigquery.googleapis.com/datasets.update` | `principalSet://goog/public:all` | the NTK data-tier group **and** the specific workload service accounts, enumerated | **folder** holding NTK projects |
 | 8 | `orgpolicy.googleapis.com/policies.create`, `.update`, `.delete`, `orgpolicy.googleapis.com/customConstraints.*` | `principalSet://goog/public:all` | `principalSet://goog/group/grp-guardrail-admins@example.com` | **organization** |
-| 9 | `accesscontextmanager.googleapis.com/servicePerimeters.*`, `accesscontextmanager.googleapis.com/accessLevels.*`, `accesscontextmanager.googleapis.com/policies.*`, `accesscontextmanager.googleapis.com/authorizedOrgsDescs.*` | `principalSet://goog/public:all` | `principalSet://goog/group/grp-guardrail-admins@example.com` | **organization** |
-| 10 | `logging.googleapis.com/sinks.update`, `sinks.delete`, `logging.googleapis.com/exclusions.*`, `logging.googleapis.com/buckets.update`, `buckets.delete` | `principalSet://goog/public:all` | `principalSet://goog/group/grp-logging-admins@example.com` | **organization** |
-| 11 | `iam.googleapis.com/workloadIdentityPools.*`, `iam.googleapis.com/workloadIdentityPoolProviders.*`, `iam.googleapis.com/workforcePools.*`, `iam.googleapis.com/workforcePoolProviders.*`, `iam.googleapis.com/oauthClients.*`, `iam.googleapis.com/oauthClientCredentials.*` | `principalSet://goog/public:all` | `principalSet://goog/group/grp-identity-admins@example.com` | **organization** |
+| 9 | `accesscontextmanager.googleapis.com/servicePerimeters.*`, `accesscontextmanager.googleapis.com/accessLevels.*`, `accesscontextmanager.googleapis.com/policies.*`, `accesscontextmanager.googleapis.com/authorizedOrgsDescs.*` — group support for these four families is **not** on the confirmed list (verify against current docs); if the check fails, enumerate `.create`, `.update`, `.delete`, `.replaceAll`, `.commit`, `.setIamPolicy` individually as §9.6 does | `principalSet://goog/public:all` | `principalSet://goog/group/grp-guardrail-admins@example.com` | **organization** |
+| 10 | `logging.googleapis.com/sinks.update`, `sinks.delete`, `logging.googleapis.com/exclusions.*` (group support unconfirmed — verify against current docs, else enumerate `exclusions.create`, `.update`, `.delete`), `logging.googleapis.com/buckets.update`, `buckets.delete` | `principalSet://goog/public:all` | `principalSet://goog/group/grp-logging-admins@example.com` | **organization** |
+| 11 | `iam.googleapis.com/workloadIdentityPools.*`, `iam.googleapis.com/workforcePools.*`, `iam.googleapis.com/oauthClients.*` (all three confirmed groups); plus `iam.googleapis.com/workloadIdentityPoolProviders.*`, `iam.googleapis.com/workforcePoolProviders.*`, `iam.googleapis.com/oauthClientCredentials.*` — **group support unconfirmed, verify against current docs** before relying on these three | `principalSet://goog/public:all` | `principalSet://goog/group/grp-identity-admins@example.com` | **organization** |
 | 12 | `iam.googleapis.com/principalaccessboundarypolicies.*` (includes `.bind`, `.unbind`) | `principalSet://goog/public:all` | `principalSet://goog/group/grp-guardrail-admins@example.com` | **organization** |
 
 **Permissions IAM Deny does not support — use the compensating control instead:**
@@ -2307,13 +2347,13 @@ All permissions below were confirmed deniable. Denied principal set `principalSe
 | Wanted | Reality | Compensating control |
 |---|---|---|
 | Deny service enablement | `serviceusage.googleapis.com/services.enable` / `.disable` are **not** in the supported list | `constraints/gcp.restrictServiceUsage` in allow-list mode at the project/folder; alert on `serviceusage` Admin Activity |
-| Protect deny policies from a deny admin | `iam.googleapis.com/denypolicies.*` is **not** in the supported list | Limit `roles/iam.denyAdmin` to a break-glass-gated group; bind PAB to that group; alert on `iam.denypolicies` mutations |
+| Protect deny policies from a deny admin | `iam.googleapis.com/denypolicies.*` is **not** in the supported list | Limit `roles/iam.denyAdmin` and `roles/iam.denyReviewer` to a named break-glass-gated group. **PAB cannot be bound to a Google group** — the seven principal sets are org / folder / project / Workspace domain / workforce pool / workload pool / agent identities (§5.7), and the binding `condition` reaches only `principal.type` and `principal.subject` — so scope instead by binding PAB at the **project or folder principal set the deny admins operate from**, or by a binding `condition` on `principal.subject`. Alert on `iam.denypolicies` mutations and require dual sign-off. |
 | Stop PAB bindings being removed | `*.createPolicyBinding` / `.deletePolicyBinding` / `.updatePolicyBinding` / `.searchPolicyBindings` are exceptions PAB itself cannot block | Deny rule #12 above plus role hygiene on `roles/resourcemanager.projectIamAdmin` / `folderIamAdmin` and `roles/iam.principalAccessBoundaryUser` |
 | Time-box a deny (e.g. "deny outside business hours") | Denial conditions support **only** tag functions | Scope by attachment node, `exceptionPrincipals`, or a project tag toggled by an approval workflow |
 | Deny impersonation of one named SA | No resource-name conditions | Isolate the SA into its own project/folder and attach the deny there; or tag the project and use `resource.matchTag` |
 | Stop perimeter deletion via org policy | ACM custom constraints support only `CREATE`/`UPDATE` | Deny rule #9 (this is the only control that covers `DELETE`) |
 
-#### Exfil scenario
+#### DN — Exfil scenario
 
 Deny rules are what make the rest of the report durable. Rule #4 severs **AP-03** at its impersonation hop for everyone outside the CI group, and no project-level `setIamPolicy` can re-open it. Rule #1 kills **AP-02** at the source. Rule #7 is the last line for **AP-01/AP-07** when the perimeter itself has been widened. Rules #8–#12 are the direct counter to **AP-13**: they are the only controls that constrain an org-level Owner, because deny evaluates before allow and cannot be overridden by any grant.
 
@@ -2326,7 +2366,7 @@ gcloud policy-troubleshoot iam //cloudresourcemanager.googleapis.com/projects/PR
 ```
 Policy Troubleshooter evaluates allow **and** deny **and** PAB, which is exactly why it — not Policy Analyzer — is the verification tool here.
 
-#### Remediation
+#### DN — Remediation
 
 ```json
 {
@@ -2398,7 +2438,7 @@ Terraform uses snake_case (`denied_permissions`) for the camelCase API fields (`
 
 ### 5.6 Private Service Connect
 
-#### Observe
+#### PS — Observe
 
 1. Inventory every PSC object in every project. The five object types are **endpoints** (internal IP + forwarding rule), **backends** (a NEG behind a load balancer), **interfaces** (producer→consumer initiated), **service attachments** (the producer-side publish resource), and **PSC network endpoint groups** (targeting a service attachment or Google APIs).
    ```bash
@@ -2424,7 +2464,7 @@ Terraform uses snake_case (`denied_permissions`) for the camelCase API fields (`
 6. Record whether VPC Flow Logs are enabled on the subnets holding PSC endpoints, on both consumer and producer sides.
 7. Cross-check the effective egress firewall rules against the endpoint IPs (from §5.2).
 
-#### Findings tests
+#### PS — Findings tests
 
 1. **PS-01 — `all-apis` bundle in use.** Any PSC-for-Google-APIs endpoint uses `--target-google-apis-bundle=all-apis`. That bundle "provides access to most Google APIs and services **regardless of VPC Service Controls support**" — the same risk profile as `private.googleapis.com`, and access to unsupported services is **allowed by default**. → **HIGH**; **CRITICAL** in a VPC serving CONFIDENTIAL/NTK projects. The `vpc-sc` bundle blocks unsupported services.
 2. **PS-02 — `all-apis` without service patterns.** An `all-apis` endpoint (or `private.googleapis.com`) is in use and the perimeter does not set `vpcAccessibleServices.allowedServicePatterns` with `servicePatternsEnforcementScopes: [GOOGLE_APIS_VIA_PRIVATE_PATH]`. → **HIGH** (same finding as SC-28; report once, cross-referenced).
@@ -2437,13 +2477,13 @@ Terraform uses snake_case (`denied_permissions`) for the camelCase API fields (`
 9. **PS-09 — PSC reachable from on-prem.** A PSC endpoint's IP falls within a range advertised to the on-prem network by Cloud Router (check `gcloud compute routers get-status` and the custom advertisement set), or its subnet is otherwise routable across the interconnect/VPN. → **HIGH**. This extends the endpoint — and everything behind it — into the soft interior, where any compromised host can reach it.
 10. **PS-10 — Google-APIs endpoint reachable from on-prem.** The `p.googleapis.com` Service Directory zone is resolvable from on-prem and the endpoint IP is advertised. Assess whether that is the intended on-prem path to Google APIs and whether the bundle is `vpc-sc`; an `all-apis` endpoint reachable from on-prem gives interior hosts a private path to APIs VPC-SC cannot police. → **CRITICAL** in that combination. (PSC bundle DNS naming beyond the `SERVICE-ENDPOINTNAME.p.googleapis.com` form: verify against current docs.)
 
-#### Exfil scenario
+#### PS — Exfil scenario
 
 PSC is the quiet variant of **AP-06**. A compromised workload with `compute.forwardingRules.create` (or an insider) stands up an endpoint pointed at an attacker-operated service attachment in another organization, then writes CONFIDENTIAL data to what looks, from every network control's point of view, like a local internal IP. No internet egress, no NAT translation record, no VPC-SC violation — because it is not a Google API call — and no destination in the consumer's flow log beyond an RFC1918 address.
 
 The Google-APIs variant is **AP-01** with the perimeter's own network path turned against it: an `all-apis` bundle endpoint reaches every Google API that VPC Service Controls does not support, from inside a VPC that the design document describes as locked down. Combined with PS-09/PS-10 it becomes **AP-12**: an interior host reaches cloud data over a private path that neither the cloud egress controls nor the on-prem egress controls were designed to see.
 
-#### Remediation
+#### PS — Remediation
 
 ```bash
 # Google APIs via PSC: require the vpc-sc bundle.
@@ -2522,7 +2562,7 @@ The hierarchy-indicator value format (`under:organizations/...`) for the two `re
 
 PAB limits which **resources a principal is eligible to access**, regardless of what allow policies grant. It is not a permission filter: `effect` supports only `ALLOW`, so PAB cannot express "deny permission X everywhere" — that is IAM Deny's job. The two are complementary, and this catalog treats them as such: **Deny** removes a *permission* from a principal set everywhere; **PAB** removes every *resource outside a boundary* from a principal set.
 
-#### Observe
+#### PB — Observe
 
 ```bash
 gcloud iam principal-access-boundary-policies list --organization=ORG_ID --location=global --format=json
@@ -2548,7 +2588,7 @@ Principal-set formats, all with a **leading `//`** (note this differs from deny-
 | Google Workspace domain | `//iam.googleapis.com/locations/global/workspace/CUSTOMER_ID` |
 | Agent identities | `//agents.global.org-ORGANIZATION_ID.system.id.goog/attribute.container/projects/PROJECT_NUMBER` |
 
-#### Findings tests
+#### PB — Findings tests
 
 1. **PB-01 — no boundary on federated principals.** No PAB policy is bound to any workload identity pool or workforce identity pool principal set. → **HIGH**. These are the highest-risk principals in the environment (see §5.8) and PAB is the only control that caps their reach independently of grants.
 2. **PB-02 — enforcement version below 3.** Any bound PAB policy has `enforcementVersion` of `1` or `2`. Service-account impersonation only becomes PAB-blockable at **version 3**: below that, the policy provides **zero** protection against `iam.googleapis.com/serviceAccounts.getAccessToken`, `signJwt`, `signBlob`, `actAs`, or `serviceAccountKeys.create`. → **CRITICAL** when the policy is presented as impersonation containment; **HIGH** otherwise. Pinned versions never auto-upgrade — "you must update your principal access boundary policies to use the new version".
@@ -2560,7 +2600,7 @@ Principal-set formats, all with a **leading `//`** (note this differs from deny-
 8. **PB-08 — limits reached.** More than 10 PAB policies bound to a single principal-set target, more than 500 resources across a policy's rules, more than 500 rules in a policy, or more than 1,000 policies in the organization. → **LOW–MEDIUM**; note it, because the workaround is always to widen a boundary.
 9. **PB-09 — untested rollout.** A PAB policy is in place with no evidence of a Policy Simulator run before enforcement. → **MEDIUM**. Policy Simulator has a dedicated mode for PAB policies, and both `roles/iam.denyAdmin` and `roles/iam.principalAccessBoundaryAdmin` carry `policysimulator.*` permissions for it.
 
-#### Exfil scenario
+#### PB — Exfil scenario
 
 PAB is the hard stop on the reachability paths computed in §6. Where IAM Deny severs a chain by removing a *verb*, PAB severs it by removing the *destination*: a compromised CI credential that has escalated to a data-tier service account still cannot read a project outside its boundary, because eligibility is evaluated before the allow policy is consulted at all.
 
@@ -2568,7 +2608,7 @@ Concretely, it is the containment control for **AP-10** (a federated principal t
 
 The failure mode that makes this control imaginary is PB-02: a policy pinned to enforcement version 1 or 2 blocks Storage, BigQuery, Logging, Pub/Sub and Resource Manager but **not a single impersonation permission** — so the exact escalation the boundary was bought to contain passes straight through. Read `enforcementVersion` on every policy before crediting PAB with anything.
 
-#### Remediation
+#### PB — Remediation
 
 ```bash
 cat > /tmp/pab-ci.yaml <<'EOF'
@@ -2635,9 +2675,9 @@ Terraform's field is `enforcement_version` (snake_case) and it accepts the strin
 
 ### 5.8 Workload Identity Federation
 
-#### Observe
+#### WI — Observe
 
-1. Enumerate every pool and provider, including soft-deleted ones (a deleted pool is undeletable for **30 days** — a resurrection window that is a persistence primitive).
+1. Enumerate every pool and provider, including soft-deleted ones (a deleted pool can be **undeleted** for 30 days before the deletion becomes permanent — a resurrection window that is a persistence primitive).
    ```bash
    gcloud iam workload-identity-pools list --location=global --show-deleted --format=json
    gcloud iam workload-identity-pools providers list --location=global \
@@ -2660,7 +2700,7 @@ Terraform's field is `enforcement_version` (snake_case) and it accepts the strin
 5. Record whether STS Data Access logging is enabled (`sts.googleapis.com`, `ADMIN_READ`) and whether workforce providers have `--detailed-audit-logging`.
 6. Record the GKE pools separately: the pool is auto-named `PROJECT_ID.svc.id.goog`, and node pools must run `--workload-metadata=GKE_METADATA` for the GKE metadata server to intercept at all.
 
-#### Findings tests
+#### WI — Findings tests
 
 1. **WI-01 — "any repo in the world" (the canonical GitHub misconfiguration).** Evaluate all three clauses:
    - the provider's `oidc.issuerUri` is `https://token.actions.githubusercontent.com` (or the trailing-slash variant), **and**
@@ -2695,13 +2735,13 @@ Terraform's field is `enforcement_version` (snake_case) and it accepts the strin
 15. **WI-15 — newer trust surface unreviewed.** Attestation rules (`SetAttestationRules`, `AddAttestationRule`) or managed workload identities / pool namespaces are in use and were not enumerated. → **MEDIUM**; these are a second, less-watched path to grant trust. (Maturity and GA status: verify against current docs.)
 16. **WI-16 — workforce pool hygiene.** `--session-duration` is at the 43200 s (12 h) ceiling on an admin-capable pool; or `--disable-programmatic-signin` is not set on a pool intended for human web SSO only; or `--detailed-audit-logging` is off on a privileged pool; or the attribute mapping uses a mutable claim (email, UPN, display name) instead of `assertion.oid`. → **MEDIUM–HIGH** each. Session duration must be >900 s and <43200 s; the default is 1 hour.
 
-#### Exfil scenario
+#### WI — Exfil scenario
 
 **AP-10** end to end, in the shape it actually occurs: an attacker creates a repository in their own GitHub account → requests an OIDC token with `permissions: id-token: write` → the token's `iss` is the shared GitHub issuer, so it passes an empty or mis-scoped `attributeCondition` (WI-01) → the pool-wide `principalSet://.../*` binding (WI-02) lets it impersonate the CI service account → that SA holds project-level `roles/iam.serviceAccountTokenCreator` (IA-02) or `roles/editor` (WI-07) → read the CONFIDENTIAL dataset → `EXPORT DATA` to a bucket in the attacker's own project (**AP-07**). Not one step of this touches the network, so no firewall rule and no VPC-SC perimeter sees it until the final read — and the perimeter only sees that if the identity is not in an ingress rule.
 
 The detection posture is the aggravating factor: the token exchange is a **Data Access** log (off by default, WI-13), the impersonation is a **Data Access** log (off by default), and only the final data read might be logged — also Data Access, also off by default. Score WIF findings assuming the whole chain is invisible unless you have evidence otherwise.
 
-#### Remediation
+#### WI — Remediation
 
 The correct restrictive provider — numeric IDs, tenant pinned, branch pinned, default audience:
 
@@ -2778,7 +2818,7 @@ Then bind a PAB policy to the pool (see §5.7) so that even a perfect token cann
 
 ### 5.9 Identity
 
-#### Observe
+#### ID — Observe
 
 1. **Super admins.** Cloud Identity / Workspace super admins are **above every control in this review**: they are implicitly granted permission to modify the IAM policy of the organization node, they can grant themselves any role in the organization, and consequently "you can't prevent them from being able to modify or delete audit logs." Enumerate them first.
    ```
@@ -2807,7 +2847,7 @@ Then bind a PAB policy to the pool (see §5.7) so that even a perfect token cann
    ```
    `--managed-by` takes `user`, `system`, or `any` (default). **`user` is the exfil-relevant filter** — user-managed keys are the exportable, long-lived credential; `system` keys are Google-rotated and cannot be exfiltrated. Record every key's `validAfterTime`, and where the private key material lives (CI secret store, on-prem vault, a laptop, a jump box).
 
-#### Findings tests
+#### ID — Findings tests
 
 1. **ID-01 — super-admin count and hygiene.** More super admins than the emergency minimum (a working default: 2 named break-glass accounts plus at most 2 operational), **or** any super admin account is also a person's daily-driver account rather than a separate `-admin` identity. → **CRITICAL**. Google's guidance is verbatim: "Retain only a minimal number of super-admin users and discourage everyday usage" and "Give super admins a separate account that requires a separate login."
 2. **ID-02 — weak authentication on privileged accounts.** 2SV is not enforced for super admins and all elevated accounts, or it is enforced with a phishable factor rather than "a security key or other physical authentication device". → **CRITICAL**.
@@ -2827,7 +2867,7 @@ Then bind a PAB policy to the pool (see §5.7) so that even a perfect token cann
 14. **ID-14 — group closure unverifiable.** The transitive membership query fails on licensing or on partial visibility. → report as an **evidence gap**, name which groups could not be resolved, and do not assert that group-based access is bounded.
 15. **ID-15 — no group-based access at all.** Roles are bound to individual users rather than groups, so offboarding is manual and per-project. → **MEDIUM**. This is the one place where *more* group use is the recommendation — provided ID-11 and ID-12 are satisfied first.
 
-#### Exfil scenario
+#### ID — Exfil scenario
 
 Identity is where **AP-11** starts and where **AP-13** ends. The group-write variant is the one most reviews miss and is worth writing out in the report as its own chain: a low-privilege insider holds Workspace Groups Admin (or is a MANAGER of `grp-data-readers@`) → adds themselves to that group → the group holds `roles/bigquery.dataViewer` on three CONFIDENTIAL datasets → reads → exports. **No IAM policy changed. No `SetIamPolicy` event exists.** The only evidence is a Workspace audit entry that may not be reaching Cloud Logging at all.
 
@@ -2835,7 +2875,7 @@ The super-admin case is simpler and worse: a super admin is above org policy, ab
 
 Service-account keys are **AP-02** in inventory form: for each key, the question the report must answer is not "does it exist" but "where is the private key file, who can read that location, and what does the SA reach".
 
-#### Remediation
+#### ID — Remediation
 
 ```bash
 # Prove which keys are the exportable kind, per service account, across the org.
@@ -2854,8 +2894,10 @@ gcloud org-policies set-policy /tmp/key-expiry.yaml        # iam.serviceAccountK
 ```
 
 ```hcl
-# Bound the blast radius of group-based access: bind roles to groups, then bound the group with PAB
-# and deny the Tier-0 verbs for everyone outside the guardrail group (see §5.5).
+# Bound the blast radius of group-based access: bind roles to groups, then bound the *principals* —
+# PAB targets org/folder/project, Workspace-domain, workforce-pool, workload-pool and agent principal
+# sets, never a Google group (§5.7) — and deny the Tier-0 verbs for everyone outside the guardrail
+# group (see §5.5).
 resource "google_project_iam_member" "data_readers" {
   project = var.data_project
   role    = "roles/bigquery.dataViewer"
@@ -2869,7 +2911,7 @@ Group-write cannot be constrained by IAM — it is a Workspace authority. The en
 
 ### 5.10 Access
 
-#### Observe
+#### AX — Observe
 
 1. Access levels and their conditions: already enumerated in §5.3 — reuse that evidence rather than re-collecting it, and record here specifically **which access level gates on-prem-originated traffic** and what its `members` and `devicePolicy` contain.
 2. Context-aware access bindings for Google Cloud console and gcloud:
@@ -2882,12 +2924,12 @@ Group-write cannot be constrained by IAM — it is a Workspace authority. The en
 5. Just-in-time elevation: what tool grants temporary roles, what identity it runs as, who approves, and how the grant is revoked.
 6. The hybrid access path end to end: how an on-prem-originated API call authenticates, which access level or ingress rule admits it, and whether DNS sends it to the restricted VIP at all.
 
-#### Findings tests
+#### AX — Findings tests
 
-1. **AX-01 — network position equals trust for on-prem access.** The access level admitting on-prem-originated requests contains `ipSubnetworks` of corporate RFC1918 ranges with **empty `members`** and **unset `devicePolicy`**. → **CRITICAL**. Given the assume-breach interior model, anything that can route packets from the corporate LAN inherits this: a compromised laptop, a rogue VM on the same VLAN, a partner site-to-site VPN. Ask the human, literally:
+1. **AX-01 — network position equals trust for on-prem access.** (Same field as test `SC-18` in §5.3 — per §5 rule 7, emit **one** finding: under `SC-` when the level's defect is generic, under `AX-` when the level exists specifically to admit the hybrid path. Cite the other as `also test <ID>`.) The access level admitting on-prem-originated requests contains `ipSubnetworks` of corporate RFC1918 ranges with **empty `members`** and **unset `devicePolicy`**. → **CRITICAL**. Given the assume-breach interior model, anything that can route packets from the corporate LAN inherits this: a compromised laptop, a rogue VM on the same VLAN, a partner site-to-site VPN. Ask the human, literally:
    > **"For each Google Cloud API surface reachable from the on-prem network, name the mechanism that authenticates the caller — a Google identity in an ingress rule, an access level `members` list, a device policy, or nothing but the source IP range."**
 2. **AX-02 — access level used where an ingress rule belongs.** An access level exists whose intent is expressible as an ingress rule naming identities. Google's own guidance under `NO_MATCHING_ACCESS_LEVEL` is to prefer an ingress rule "because an ingress rule provides granular access control". → **HIGH** for on-prem paths, **MEDIUM** elsewhere. Note the forcing function to report alongside it: access-level `members[]` **does not support groups**, only `user:` and `serviceAccount:`, which is precisely why teams fall back to IP-only levels.
-3. **AX-03 — geolocation on a private path.** An access level uses `regions[]` for traffic that arrives over the interconnect or via Private Google Access. Such levels **always deny private IPs and do not support Private Google Access**, and where they do apply they resolve to the VPN server's public IP. → **MEDIUM** as a broken control; **HIGH** if it is the only condition and is believed to be enforcing.
+3. **AX-03 — geolocation on a private path.** (Same field as test `SC-20`; emit one finding per §5 rule 7.) An access level uses `regions[]` for traffic that arrives over the interconnect or via Private Google Access. Such levels **always deny private IPs and do not support Private Google Access**, and where they do apply they resolve to the VPN server's public IP. → **MEDIUM** as a broken control; **HIGH** if it is the only condition and is believed to be enforcing.
 4. **AX-04 — device policy is nominal.** A level is described as device-gated but its `devicePolicy` sub-lists are empty (empty `allowedEncryptionStatuses`, `osConstraints`, or `allowedDeviceManagementLevels` each allow **all** values) or `requireScreenlock` is absent (defaults to false). → **HIGH**.
 5. **AX-05 — no context-aware access on the console/CLI path.** No `gcpUserAccessBindings` exist for the groups holding Tier-0 roles, so console and gcloud access from an unmanaged device is unconditioned. → **HIGH**.
 6. **AX-06 — IAP TCP forwarding over-scoped.** `roles/iap.tunnelResourceAccessor` bound at project, folder, or org level rather than on specific instances or tunnel destination groups. → **HIGH**; the holder can tunnel to every VM in scope, from anywhere, bypassing the need for any network position at all. Verify the corresponding ingress allow from `35.235.240.0/20` is scoped to the intended targets rather than the whole network.
@@ -2897,13 +2939,13 @@ Group-write cannot be constrained by IAM — it is a Workspace authority. The en
 10. **AX-10 — standing privilege where JIT belongs.** Any Tier-0 role is a standing binding rather than a time-boxed grant. → **HIGH**. State the implementation constraint that most JIT designs get wrong: `request.time` conditions work only on the 29 services that support IAM Conditions, and **`iam.googleapis.com` is not one of them** — so a time-boxed `roles/iam.serviceAccountTokenCreator` binding is unimplementable as a condition. JIT for impersonation must be an automated bind/unbind on the service-account resource, with the unbind scheduled at grant time.
 11. **AX-11 — reauthentication not enforced for perimeter access.** Session controls for reauthentication are not configured on the access levels gating admin access. → **MEDIUM** (feature detail: verify against current docs; cross-reference §5.9's Google Cloud session control, which is a different setting).
 
-#### Exfil scenario
+#### AX — Exfil scenario
 
 This area decides whether **AP-01** dies at the boundary or walks through it. A stolen credential used from the internet hits the perimeter and dies — unless an access level admits the caller's network position, in which case the perimeter admits the request and the credential works exactly as its owner's would. The on-prem case (**AP-12**, interior→cloud) is the same failure with a shorter walk: the attacker does not need to steal a network position, because the soft interior hands out network position to anything that gets a foothold.
 
 IAP TCP forwarding is the mirror image and is frequently over-granted: `roles/iap.tunnelResourceAccessor` at project level converts "no external IP, private cluster, tight firewall" into "anyone in the group can open a TCP tunnel to any VM from any network", which is the entry step for the metadata-server escalation in §6.
 
-#### Remediation
+#### AX — Remediation
 
 ```bash
 # Replace an IP-only on-prem access level with an identity-scoped ingress rule.
@@ -2958,7 +3000,7 @@ Back the last one with `constraints/run.managed.requireInvokerIam` (prevents the
 
 ### 5.11 Break-glass
 
-#### Observe
+#### BG — Observe
 
 Ask for the break-glass runbook first, then verify every claim in it against configuration. If no runbook exists, that is finding BG-01 and the rest of this subsection is assessed against whatever the emergency procedure actually is in practice.
 
@@ -2970,7 +3012,7 @@ Ask for the break-glass runbook first, then verify every claim in it against con
 6. Record the alerting: which log filter fires, where the alert goes, and whether that path survives the mutation of the logging pipeline.
 7. Record the last use and the last rehearsal.
 
-#### Findings tests
+#### BG — Findings tests
 
 1. **BG-01 — no dedicated break-glass identity.** Emergency access is "a super admin logs in" or "someone uses their normal admin account". → **CRITICAL**. There is then no identity whose use is by definition anomalous, so there is nothing to alert on.
 2. **BG-02 — not deny-by-default.** The break-glass principal holds standing Tier-0 bindings in normal state. → **CRITICAL**. Break-glass that is always live is just a shared admin account.
@@ -2990,7 +3032,7 @@ Ask for the break-glass runbook first, then verify every claim in it against con
 10. **BG-10 — never exercised.** No evidence of a rehearsal within the last 6 months, or the last rehearsal failed and the procedure was not fixed. → **MEDIUM**; untested break-glass reliably becomes "use the super admin instead" under pressure, which regresses to BG-01.
 11. **BG-11 — over-broad elevation target.** The elevation grants `roles/owner` at the organization or a top-level folder rather than a purpose-built role at the folder containing the incident's projects. → **HIGH**.
 
-#### Exfil scenario
+#### BG — Exfil scenario
 
 **AP-09** in its worst form is short: retrieve the standing credential → authenticate (no second factor) → the identity is already in an access level, so the perimeter admits it from anywhere → read CONFIDENTIAL data → export. Every other control in this report is bypassed by design, because that is what the account was built to do. The chain has one step that could be detected and, in the BG-07 case, it is not.
 
@@ -3065,7 +3107,7 @@ resource "google_monitoring_alert_policy" "breakglass_used" {
 
 Treat this as a control, not an afterthought. **Data Access logs are off by default for every service except BigQuery**, which means most of the read activity that constitutes exfiltration is invisible, and so are service-account impersonation and federated token exchange.
 
-#### Observe
+#### LG — Observe
 
 1. Record which of the four log types exist and where they land:
 
@@ -3092,7 +3134,7 @@ Treat this as a control, not an afterthought. **Data Access logs are off by defa
    gcloud logging sinks list --project=PROJECT_ID --format=json
    gcloud logging sinks describe SINK_NAME --organization=ORG_ID --format=json
    ```
-   Record per sink: `destination`, `filter`, every `exclusions[]` entry (up to 50 per sink), `disabled`, `includeChildren`, `interceptChildren`, and `writerIdentity` (form `serviceAccount:service-PROJECT_NUMBER@gcp-sa-logging.iam.gserviceaccount.com`). Resolve the destination's project and check whether it is in your organization.
+   Record per sink: `destination`, `filter`, every `exclusions[]` entry (up to 50 per sink), `disabled`, `includeChildren`, `interceptChildren`, and `writerIdentity` — a `serviceAccount:…@gcp-sa-logging.iam.gserviceaccount.com` account whose local part differs between project, folder and organization sinks (`service-PROJECT_NUMBER@…` for a project sink; the org/folder forms use the org/folder number). **Read the literal value back with `gcloud logging sinks describe SINK --organization=ORG_ID --format="value(writerIdentity)"`; never construct it** — a constructed identity is what makes the destination grant silently wrong. Resolve the destination's project and check whether it is in your organization.
 4. Enumerate log buckets and their protection:
    ```bash
    gcloud logging buckets list --organization=ORG_ID --format=json
@@ -3102,7 +3144,7 @@ Treat this as a control, not an afterthought. **Data Access logs are off by defa
 5. Record the alerting inventory: every `google_monitoring_alert_policy` with a `condition_matched_log` block, its filter, and its notification channels.
 6. Record the SCC tier and which services are active.
 
-#### Findings tests
+#### LG — Findings tests
 
 1. **LG-01 — Data Access logs off where exfil happens.** For each project holding CONFIDENTIAL/NTK, `auditConfigs` does not enable `ADMIN_READ` **and** `DATA_READ` for at least: `iam.googleapis.com` (enabling it for the IAM API also enables it for the **IAM Service Account Credentials API** — this is what makes impersonation visible), `sts.googleapis.com`, `storage.googleapis.com`, `cloudkms.googleapis.com`, `secretmanager.googleapis.com`, `pubsub.googleapis.com`, `spanner.googleapis.com`, `sqladmin.googleapis.com`, `firestore.googleapis.com`, `aiplatform.googleapis.com`, `dataflow.googleapis.com`. → **CRITICAL**. BigQuery is the documented exception whose Data Access logs are on by default; every other read is invisible.
 2. **LG-02 — auditConfigs only at project level.** `auditConfigs` are set on projects but not at the organization node. `auditConfigs` inherit, and an org-level config is the only version a project-level `setIamPolicy` holder cannot quietly remove. → **HIGH**.
@@ -3143,7 +3185,7 @@ Every row must exist as a log-based alerting policy with an out-of-band notifica
 | # | Alert | Filter (§4.7.3) | Log type | Prerequisite / trap |
 |---|---|---|---|---|
 | A | **`SetIamPolicy` at any node** | `F1` | Admin Activity | none (always on). Substring match is required: Resource Manager emits `cloudresourcemanager.v3.projects.setIamPolicy`, `…v3.folders.setIamPolicy`, `…v3.organizations.setIamPolicy` plus v1/v1beta1/v2/v2beta1 variants |
-| B | **Token generation / impersonation** | `F2` | **Data Access** | **Requires `ADMIN_READ` on `iam.googleapis.com`.** Method names are **bare** — a fully-qualified filter matches nothing |
+| B | **Token generation / impersonation** | `F2` | **Data Access** | **Requires `ADMIN_READ` *and* `DATA_READ` on `iam.googleapis.com`** — `ADMIN_READ` alone misses `GenerateIdToken` and `SignBlob`. Method names are **bare** — a fully-qualified filter matches nothing |
 | C | **Federated token exchange** | `F3` | **Data Access** | Requires `ADMIN_READ` on `sts.googleapis.com`. Pivot on `protoPayload.metadata.mapped_principal` for the pool subject and `protoPayload.resourceName` for the provider |
 | D | **SA key creation and upload** | `F4` | Admin Activity | none. **`UploadServiceAccountKey`** is the BYO-public-key persistence path most filters miss; note `SetIAMPolicy` with capital `IAM` |
 | E | **Custom-role mutation** | `F5` | Admin Activity | none. This is the only detection for the *Role-mutate* edge, which changes no binding |
@@ -3160,7 +3202,7 @@ Every row must exist as a log-based alerting policy with an out-of-band notifica
 
 Useful pivots when hunting rather than alerting: `protoPayload.requestMetadata.callerIp` (the literal string **`private`** means the call originated inside Google's production network), `protoPayload.request_metadata.caller_network` (set only when the network host project is in the same organization or project as the accessed resource — cross-org callers lose network attribution), and `protoPayload.authenticationInfo.serviceAccountDelegationInfo.firstPartyPrincipal.principalEmail` (the real caller behind an impersonated SA — present only when Data Access logging is on).
 
-#### Exfil scenario
+#### LG — Exfil scenario
 
 Detection coverage decides the **severity** of every other finding in this report, and it is itself the target of **AP-08** and of the defense-evasion step in **AP-13**.
 
@@ -3170,26 +3212,36 @@ The concrete failure the report must state: with Data Access logs off, **AP-03**
 
 Score every attack path in this report on the detection posture derived here: does the step produce an audit-log entry, is that log type **actually enabled** for that project, is it routed to a sink outside the workload's control, is it retained long enough to investigate, and is anything alerting on it. An undetected path is scored more severely than a detected one, and "we have audit logs" is never an answer — name the log type, the enablement state, the retention, and the alert.
 
-#### Remediation
+#### LG — Remediation
 
 Enable Data Access logs at the **organization** node — the only version a project-level `setIamPolicy` holder cannot quietly undo:
 
 ```bash
+# Make the edit mechanical, not manual: the auditConfigs block is a TOP-LEVEL key of the
+# policy document, so hand-pasting the fragment alone produces a file gcloud rejects.
 gcloud organizations get-iam-policy ORG_ID --format=json > /tmp/org-policy.json
-# add the auditConfigs block below, then:
-gcloud organizations set-iam-policy ORG_ID /tmp/org-policy.json
+jq '.auditConfigs = [{"service":"allServices","auditLogConfigs":[
+      {"logType":"ADMIN_READ"},{"logType":"DATA_READ"},{"logType":"DATA_WRITE"}]}]' \
+   /tmp/org-policy.json > /tmp/org-policy-new.json
+gcloud organizations set-iam-policy ORG_ID /tmp/org-policy-new.json
 ```
+
+The resulting fragment inside the policy document — `exemptedMembers` is omitted because empty is the
+default, and any non-empty value is an audit-evasion primitive:
+
 ```json
-"auditConfigs": [
-  {
-    "service": "allServices",
-    "auditLogConfigs": [
-      { "logType": "ADMIN_READ",  "exemptedMembers": [] },
-      { "logType": "DATA_READ",   "exemptedMembers": [] },
-      { "logType": "DATA_WRITE",  "exemptedMembers": [] }
-    ]
-  }
-]
+{
+  "auditConfigs": [
+    {
+      "service": "allServices",
+      "auditLogConfigs": [
+        { "logType": "ADMIN_READ" },
+        { "logType": "DATA_READ" },
+        { "logType": "DATA_WRITE" }
+      ]
+    }
+  ]
+}
 ```
 `allServices` is the wildcard; a service without its own entry inherits the broader configuration. `exemptedMembers` must stay empty — any entry is an audit-evasion primitive. Google's own caveat, which the report should carry so the cost is not a surprise: "Data Access audit logs volume can be large. Enabling Data Access logs might result in your Google Cloud project being charged for the additional logs usage." Where full `allServices` coverage is refused on cost grounds, enable `ADMIN_READ` + `DATA_READ` for the services in LG-01 on the CONFIDENTIAL/NTK projects at minimum, and record the residual blind spot explicitly.
 
@@ -3323,8 +3375,12 @@ NDJSON asset exports.
 
 ```bash
 # flatten every allow binding in the iam-policy export to one JSON object per (scope, role, member)
+# scope MUST be canonicalised to the ancestors[] token form for containers, or the same
+# project appears as two nodes and inheritance under-resolves (see the rule above).
 flat() { jq -c '. as $a | .iamPolicy.bindings[]? |
-  {scope:$a.name, type:$a.assetType, anc:$a.ancestors, role:.role,
+  {scope:(if ($a.assetType|test("cloudresourcemanager.googleapis.com/(Project|Folder|Organization)"))
+          then $a.ancestors[0] else $a.name end),
+   type:$a.assetType, anc:$a.ancestors, role:.role,
    member:.members[], conditional:(.condition!=null)}' "$@"; }
 
 # every custom role definition and its permission list
@@ -3422,7 +3478,7 @@ OUTPUT  for each a: the fixpoint identity set R_a, and every path to CONFIDENTIA
 | **Policy Analyzer for allow policies** | `gcloud asset analyze-iam-policy (--organization\|--folder\|--project) [--identity] [--full-resource-name] [--permissions] [--roles] [--analyze-service-account-impersonation] [--expand-groups] [--expand-resources] [--expand-roles] [--output-group-edges] [--output-resource-edges]` | "Which principals have what access to which resources", with group and role expansion | **Allow policies only.** Documented exclusions: IAM **deny** policies, **PAB** policies, **GKE RBAC**, **Cloud Storage ACLs**, **Cloud Storage public access prevention**. `--analyze-service-account-impersonation` is **one hop, computed backwards from a resource** — it does not close multi-hop chains (A→B→C), `implicitDelegation` chains, or `actAs`-via-workload-attachment. Anything stronger: verify against current docs. `gcloud asset analyze-iam-policy-longrunning` and its BigQuery output flag: verify against current docs |
 | **Policy Troubleshooter for IAM** | `gcloud policy-troubleshoot iam [RESOURCE] --permission=PERMISSION --principal-email=EMAIL` | Evaluates **allow + deny + PAB** for one triple. Use it to *prove* a guardrail actually blocks a specific principal-permission-resource combination | A point query. It cannot enumerate and cannot discover an unknown path. (The gcloud reference page describes only allow evaluation and is stale relative to the product page; trust the product page) |
 | **Role recommendations (Policy Intelligence)** — recommender ID `google.iam.policy.Recommender`; flag spelling on `gcloud recommender recommendations list`: verify against current docs | Usage-driven least-privilege suggestions over an observed 90-day window | "This role grants more than this principal used" | It is not a threat model. It does not reason about impersonation chains at all, does not evaluate deny or PAB, and will not flag an unused-but-catastrophic grant as an exfil risk beyond "unused". Never present it as chain analysis |
-| **Cloud Asset Inventory** | `gcloud asset export --content-type=` with the **lowercase-hyphenated** values `resource`, `iam-policy`, `org-policy`, `access-policy`, `os-inventory`, `relationship` (the `UPPER_SNAKE` forms are the REST enum and fail on the CLI); `gcloud asset search-all-resources`, `gcloud asset search-all-iam-policies` | The graph source: assets, ancestors, allow bindings, org policies, ACM policies | Deny policies (`gcloud iam policies list --kind=denypolicies`), PAB policies and bindings (`gcloud iam principal-access-boundary-policies`, `gcloud iam policy-bindings`), Workspace group membership, GKE RBAC objects, Cloud Build trigger contents, and any credential material on disk |
+| **Cloud Asset Inventory** | `gcloud asset export --content-type=` (spelling: see §4.2.1); `gcloud asset search-all-resources`, `gcloud asset search-all-iam-policies` | The graph source: assets, ancestors, allow bindings, org policies, ACM policies | Deny policies (`gcloud iam policies list --kind=denypolicies`), PAB policies and bindings (`gcloud iam principal-access-boundary-policies`, `gcloud iam policy-bindings`), Workspace group membership, GKE RBAC objects, Cloud Build trigger contents, and any credential material on disk |
 
 **Residual blind spot — state this list verbatim in the report appendix.** No GCP-native tool closes
 these; they exist only because this phase builds the graph by hand:
@@ -3582,9 +3638,13 @@ produces — state the log-volume cost when recommending it.
 Emit every discovered chain in exactly this shape. Field names are fixed so two reviewers produce
 comparable output and so the JSON from the helper script maps one-to-one onto the report.
 
+**This shape is a working-note artifact, not a report section.** The report renders chains in the
+§11.3.1 shape, with the band assigned by §11.1. The two shapes carry the same steps; only this one
+carries the rank score, and only §11.3.1 carries a severity band.
+
 ```
 CH-nn
-  score:            <number> (<CRITICAL|HIGH|MEDIUM|LOW>)
+  rank score:       <number>  - ORDERING ONLY. The band comes from 11.1; never write a band here.
   adversary:        <A1..A7 label from the threat model>
   starting position:<exact principal string>
   terminates at:    <CONFIDENTIAL|NTK|UNCLASSIFIED(assumed CONFIDENTIAL)> in <resource full name>
@@ -3638,9 +3698,11 @@ outranks a 2-hop chain that one break-glass admin can start.
 | | 1.25 | Every step is logged, but the chain includes a `DEPLOY_AS` step whose token read leaves no `iamcredentials` record |
 | | 1.0 | Every step is logged **and an alert exists** on it today |
 
-Bands: **CRITICAL ≥ 60**, **HIGH 24–59**, **MEDIUM 10–23**, **LOW < 10**. Ties break by: fewer hops
-first, then lexicographically by starting principal, then by terminal resource — so the ordering is
-total and two reviewers produce the identical list.
+**This score has no bands.** It exists only to order chains against one another: §11.1.5 assigns the
+band and §11.1.8 does the arithmetic. Two chains with the same rank score may legitimately carry
+different bands, and a chain's rank position says nothing about its band. Ties in the *ordering* break
+by: fewer hops first, then lexicographically by starting principal, then by terminal resource — so the
+ordering is total and two reviewers produce the identical list.
 
 Two hand-offs bind this function to the rest of the skill. Get them wrong and two sections of the
 report disagree about the same chain:
@@ -3656,11 +3718,12 @@ report disagree about the same chain:
 #### 6.3.3 Worked example
 
 > **EXAMPLE — fictional resource names, shown only to fix the output shape. Do not carry these names
-> into a real report.**
+> into a real report. Chain IDs (`CH-nn`) and finding IDs shown inside this example are illustrative
+> placeholders, not cross-references; real ones are assigned at review time.**
 
 ```
 CH-01
-  score:            60.0 (CRITICAL)
+  rank score:       60.0   (ordering only; this chain's band is assigned in 11.3.2 by 11.1)
   adversary:        A2 — low-privilege insider
   starting position:user:alice@example.com
   terminates at:    CONFIDENTIAL in //bigquery.googleapis.com/projects/acme-data-prod-01/datasets/customer_pii
@@ -3783,6 +3846,15 @@ only at organization, folder, and project.
 
 Run this after the exports are collected. It builds the graph described in §6.1, computes the closure
 to fixpoint, and emits both the §6.3 path listing and a JSON graph. Standard library only.
+
+**Write the code block below out to `privgraph.py` in the evidence directory before running it** —
+the usage line inside it assumes that filename, and nothing else in this skill creates the file:
+
+```bash
+mkdir -p ./evidence && cd ./evidence
+# paste the fenced python block below into privgraph.py, then:
+python3 -m py_compile privgraph.py    # must exit 0 before you trust any output
+```
 
 ```python
 #!/usr/bin/env python3
@@ -4019,7 +4091,12 @@ ROLE_PERMS = {
     "roles/iam.serviceAccountAdmin": {SA_SET_IAM_PERM},
     "roles/iam.serviceAccountKeyAdmin": {KEYMINT_PERM},
     # --- policy mutation ---
-    "roles/iam.securityAdmin": set(_ALL_SET_IAM),
+    # securityAdmin is ~310 *.setIamPolicy permissions and nothing else. It cannot
+    # mutate a dataset's metadata, only its IAM policy: do NOT fold in
+    # bigquery.datasets.update, or every securityAdmin holder gets a fabricated
+    # GRANT_SELF_RESOURCE edge to every BigQuery dataset in scope.
+    "roles/iam.securityAdmin": (CONTAINER_SET_IAM | {SA_SET_IAM_PERM}
+                                | {p for p in RESOURCE_SET_IAM if p.endswith(".setIamPolicy")}),
     "roles/resourcemanager.projectIamAdmin": {"resourcemanager.projects.setIamPolicy"},
     "roles/resourcemanager.folderIamAdmin": {"resourcemanager.folders.setIamPolicy"},
     "roles/resourcemanager.organizationAdmin": {
@@ -4146,6 +4223,25 @@ EDGE_DETECTION = {
 
 TIER_SCORE = {"CONFIDENTIAL": 5, "UNCLASSIFIED": 5, "NTK": 4, "INTERNAL": 2, "PUBLIC": 0}
 TERMINAL_TIERS = {"CONFIDENTIAL", "NTK", "UNCLASSIFIED"}
+# The four-tier vocabulary from TF3, plus UNCLASSIFIED. A customer-supplied
+# classification map routinely carries something else ("SECRET", "Restricted",
+# a localised term, a trailing space). Anything outside this set must be
+# normalised, not silently dropped: an unknown tier is scored as UNCLASSIFIED
+# per TF4 (CONFIDENTIAL-until-proven-otherwise) and warned about on stderr.
+KNOWN_TIERS = {"CONFIDENTIAL", "NTK", "INTERNAL", "PUBLIC", "UNCLASSIFIED"}
+_TIER_WARNED = set()
+
+
+def normalise_tier(value, nid):
+    t = str(value).strip().upper()
+    if t in KNOWN_TIERS:
+        return t
+    if t not in _TIER_WARNED:
+        _TIER_WARNED.add(t)
+        sys.stderr.write("# UNKNOWN CLASSIFICATION TIER %r (first seen on %s): scored as "
+                         "UNCLASSIFIED per TF4, and the resource stays a terminal. "
+                         "Fix the classification map.\n" % (value, nid))
+    return "UNCLASSIFIED"
 
 
 # ================================ input loading ===============================
@@ -4303,8 +4399,18 @@ class Model(object):
                 rname = name.split("//iam.googleapis.com/")[-1]
             self.custom_roles[rname] = set(perms)
             short = rname.split("/roles/")[-1]
-            if short:
-                self.custom_roles.setdefault("roles/" + short, set(perms))
+            # Do NOT alias into the predefined namespace. Custom-role IDs legally
+            # accept letters, digits, underscores and periods, so "editor",
+            # "owner", "viewer", "storage.admin" are all valid custom-role IDs; an
+            # unguarded alias makes one of them shadow the PREDEFINED role of that
+            # name for every binding in the organization.
+            alias = "roles/" + short
+            if short and alias not in ROLE_PERMS:
+                self.custom_roles.setdefault(alias, set(perms))
+            elif short:
+                sys.stderr.write(
+                    "# custom role %s shadows predefined %s - not aliased; bindings "
+                    "must cite the full custom-role name\n" % (rname, alias))
         # iam policy carried on the asset
         pol = g(rec, "iamPolicy", "iam_policy")
         if pol:
@@ -4322,6 +4428,8 @@ class Model(object):
                         self.perm_index[perm].append((member, scope, cond))
 
     def expand_role(self, role):
+        if role.startswith("roles/") and role in ROLE_PERMS:
+            return ROLE_PERMS[role]          # predefined roles always win
         if role in self.custom_roles:
             return self.custom_roles[role]
         if role in ROLE_PERMS:
@@ -4518,19 +4626,36 @@ def build_graph(model, groups, members_of, groups_of):
                 acc[key].add(perm)
         return acc
 
-    def emit(member, dst, kind, perm, scope, cond, chain, gains, sever):
-        blocked, note = denied(model, member, perm, chain, groups_of)
-        if blocked and not args.keep_denied:
+    def emit(member, dst, kind, perms, scope, cond, chain, gains, sever, label=None):
+        """perms: the iterable of v1 permission strings that create this edge (a
+        bare string is accepted for single-permission edges).
+        label:  what to display on the edge (defaults to ', '-joined perms).
+        Deny is evaluated PER PERMISSION, never on the display string: partitioning
+        a joined string on its first '.' produces a token no deny rule can match,
+        which silently disables deny subtraction for every multi-permission edge."""
+        perm_list = [perms] if isinstance(perms, str) else sorted(perms)
+        label = label or ", ".join(perm_list)
+        notes, live = [], []
+        for p in perm_list:
+            blocked, note = denied(model, member, p, chain, groups_of)
+            if note:
+                notes.append(note)
+            if not blocked:
+                live.append(p)
+        # An actAs PAIR needs BOTH halves, so denying either half kills the edge.
+        # Every other kind survives while ANY one of its permissions is un-denied.
+        dead = (len(live) < len(perm_list)) if kind == "DEPLOY_AS" else (not live)
+        if dead and not args.keep_denied:
             return None
         attrs = {}
         if cond:
             if args.drop_conditional:
                 return None
             attrs["conditional"] = True
-        if note:
-            attrs["deny_note"] = note
+        if notes:
+            attrs["deny_note"] = "; ".join(sorted(set(notes)))
         G.node(member, principal_kind(member))
-        return G.edge(member, dst, kind, perm,
+        return G.edge(member, dst, kind, label,
                       "binding at %s" % scope, sever, gains=gains, **attrs)
 
     # ---- impersonation, actAs, key-mint, SA setIamPolicy ----
@@ -4543,8 +4668,13 @@ def build_graph(model, groups, members_of, groups_of):
         res = sa_resource.get(email)
         if res:
             chain = model.chain(res)
-        else:
+        elif proj:
             chain = [proj] + [a for a in model.ancestors.get(proj, []) if a != proj]
+        else:
+            # SA inferred from a member string only (no --resources row): its own
+            # project chain is unknown, so it can only carry resource-level
+            # bindings. That is the honest answer, not a guess.
+            chain = []
         G.node(sa_id, principal_kind(sa_id), project=proj)
 
         for (member, scope, cond), perms in holders_multi(IMPERSONATE_PERMS, chain).items():
@@ -4556,7 +4686,7 @@ def build_graph(model, groups, members_of, groups_of):
                      "IAM Conditions, so resource-scoping the binding is the only narrowing "
                      "available - and add an org/folder IAM Deny enumerating %s"
                      % (scope, ", ".join(sorted(v1_to_v2(p) for p in perms))))
-            emit(member, sa_id, "IMPERSONATE", ", ".join(sorted(perms)), scope, cond, chain,
+            emit(member, sa_id, "IMPERSONATE", perms, scope, cond, chain,
                  "credentials of %s" % email, sever)
 
         for (member, scope, cond) in holders(KEYMINT_PERM, chain):
@@ -4585,7 +4715,9 @@ def build_graph(model, groups, members_of, groups_of):
         # actAs pair rule: actAs on the SA AND a create/update permission on a
         # surface that runs code. Cross-project attachment is possible unless
         # constraints/iam.disableCrossProjectServiceAccountUsage is enforced.
-        cross_ok, _ = model.constraint_enforced(proj, ("constraints/iam.disableCrossProjectServiceAccountUsage",))
+        cross_ok, _ = (model.constraint_enforced(
+            proj, ("constraints/iam.disableCrossProjectServiceAccountUsage",))
+            if proj else (False, None))
         for (member, scope, cond) in holders(ACTAS_PERM, chain):
             deploy_hits = []
             for dperm in DEPLOY_PERMS:
@@ -4602,8 +4734,9 @@ def build_graph(model, groups, members_of, groups_of):
                      "roles/iam.serviceAccountUser on this one service account only; "
                      "deny iam.googleapis.com/serviceAccounts.actAs for everyone outside the "
                      "owning deploy identity" % (dperm, dscope, scope))
-            emit(member, sa_id, "DEPLOY_AS", "%s + %s" % (ACTAS_PERM, dperm), scope, cond, chain,
-                 "runs code as %s; reads its token from 169.254.169.254" % email, sever)
+            emit(member, sa_id, "DEPLOY_AS", (ACTAS_PERM, dperm), scope, cond, chain,
+                 "runs code as %s; reads its token from 169.254.169.254" % email, sever,
+                 label="%s + %s" % (ACTAS_PERM, dperm))
 
     # ---- classification of data assets ----
     for nid, atype in model.asset_type.items():
@@ -4622,7 +4755,7 @@ def build_graph(model, groups, members_of, groups_of):
                      "principal, bind the read role on the resource itself, put the project in an "
                      "ENFORCED VPC-SC perimeter, and enable Data Access DATA_READ logs so the read "
                      "is visible at all" % (scope, ", ".join(sorted(perms))))
-            emit(member, nid, "READ_DATA", ", ".join(sorted(perms)), scope, cond, chain,
+            emit(member, nid, "READ_DATA", perms, scope, cond, chain,
                  "%s data in %s" % (tier, nid), sever)
 
     # ---- resource-level setIamPolicy: reach the data without touching project IAM ----
@@ -4634,7 +4767,7 @@ def build_graph(model, groups, members_of, groups_of):
                      "project-level admin cannot re-add it"
                      % (scope, ", ".join(sorted(perms)),
                         ", ".join(sorted(v1_to_v2(p) for p in perms))))
-            emit(member, nid, "GRANT_SELF_RESOURCE", ", ".join(sorted(perms)), scope, cond, chain,
+            emit(member, nid, "GRANT_SELF_RESOURCE", perms, scope, cond, chain,
                  "grant self (or allUsers) read on %s data without touching project IAM" % tier,
                  sever)
 
@@ -4675,7 +4808,7 @@ def build_graph(model, groups, members_of, groups_of):
     for scope in scope_nodes:
         G.node(scope, "scope")
         for email, proj in model.sa_emails.items():
-            if scope in ([proj] + model.ancestors.get(proj, [])):
+            if proj and scope in ([proj] + model.ancestors.get(proj, [])):
                 G.edge(scope, "serviceAccount:" + email, "GRANT_IMPLIES",
                        "(implied by setIamPolicy at %s)" % scope,
                        "SA lives under %s" % scope,
@@ -4735,18 +4868,18 @@ def principal_kind(p):
 def classify(model, nid):
     explicit = model.classification
     if nid in explicit:
-        return explicit[nid].upper()
+        return normalise_tier(explicit[nid], nid)
     for pattern, tier in explicit.items():
         if any(ch in pattern for ch in "*?[") and fnmatch.fnmatch(nid, pattern):
-            return tier.upper()
+            return normalise_tier(tier, nid)
     for scope in model.chain(nid):
         if scope in explicit:
-            return explicit[scope].upper()
+            return normalise_tier(explicit[scope], nid)
     label_key = model.args.classification_label
     if label_key:
         lab = model.labels.get(nid, {})
         if label_key in lab:
-            return str(lab[label_key]).upper()
+            return normalise_tier(lab[label_key], nid)
     return "UNCLASSIFIED"
 
 
@@ -4777,9 +4910,12 @@ def closure(G, seeds):
     return reached
 
 
-def enumerate_paths(G, seed, max_depth, max_paths):
+def enumerate_paths(G, seed, max_depth, max_paths, recorded_not_ranked=None):
     """Every simple path from seed that ends on a terminal edge into
-    CONFIDENTIAL / NTK / UNCLASSIFIED data."""
+    CONFIDENTIAL / NTK / UNCLASSIFIED data. INTERNAL and PUBLIC terminals are
+    RECORDED into `recorded_not_ranked` rather than dropped: 6.1.5 point 4 says
+    they are reported but not ranked, and a silently discarded terminus reads as
+    'no path exists'."""
     results = []
     stack = [(seed, [], {seed})]
     while stack:
@@ -4801,6 +4937,8 @@ def enumerate_paths(G, seed, max_depth, max_paths):
                 tier = G.nodes.get(dst, {}).get("classification", "UNCLASSIFIED")
                 if tier in TERMINAL_TIERS:
                     results.append(path + [e])
+                elif recorded_not_ranked is not None:
+                    recorded_not_ranked.add((seed, dst, tier))
                 continue
             stack.append((dst, path + [e], visited | {dst}))
     return results
@@ -4820,32 +4958,36 @@ def principal_count_score(n):
     return 1
 
 
-def detection_factor(G, path, data_access_enabled):
+def detection_factor(G, path, data_access_enabled, workspace_sharing=False,
+                     alerting_verified=False):
+    """D per §6.3.2. Two distinctions the naive version collapses:
+    (a) MEMBER_OF is cleared by Workspace data sharing, NOT by Data Access logs;
+    (b) D = 1.0 means 'logged AND alerted today' - logged alone is not detected."""
     worst = 1.0
     for e in path:
         logged, _note = EDGE_DETECTION.get(e["kind"], (True, ""))
-        if not logged and not data_access_enabled:
+        covered = workspace_sharing if e["kind"] == "MEMBER_OF" else data_access_enabled
+        if not logged and not covered:
             worst = max(worst, 1.5)
         elif e["kind"] == "DEPLOY_AS":
             worst = max(worst, 1.25)
+    if worst == 1.0 and not alerting_verified:
+        worst = 1.25          # §6.3.2: D=1.0 requires an alert, not just a log entry
     return worst
 
 
-def band(score):
-    if score >= 60:
-        return "CRITICAL"
-    if score >= 24:
-        return "HIGH"
-    if score >= 10:
-        return "MEDIUM"
-    return "LOW"
+# There is deliberately no band() function here. The number this script computes
+# ORDERS chains against one another; it does not band them. The report band comes
+# from 11.1.5 (matrix) and 11.1.8 (arithmetic). Printing a band on the rank line
+# is what makes a chain carry two contradicting severities.
 
 
-def score_path(G, path, ease, exec_count, data_access_enabled):
+def score_path(G, path, ease, exec_count, data_access_enabled,
+               workspace_sharing=False, alerting_verified=False):
     tier = G.nodes.get(path[-1]["dst"], {}).get("classification", "UNCLASSIFIED")
     t = TIER_SCORE.get(tier, 5)
     p = principal_count_score(exec_count)
-    d = detection_factor(G, path, data_access_enabled)
+    d = detection_factor(G, path, data_access_enabled, workspace_sharing, alerting_verified)
     return round(t * ease * p * d, 2), tier, t, p, d
 
 
@@ -4877,9 +5019,11 @@ def choose_cut(path, freq):
 
 def render_path(idx, path, score, tier, ease, exec_count, det, cut_edge):
     lines = []
-    lines.append("CH-%02d  score=%s (%s)  terminates=%s  start-ease=%d  "
-                 "executors=%d  detection-factor=%.2f"
-                 % (idx, score, band(score), tier, ease, exec_count, det))
+    lines.append("CH-%02d  rank=%s (ORDERING ONLY - the band comes from 11.1)  "
+                 "terminates=%s%s  start-ease=%d  executors=%d  detection-factor=%.2f"
+                 % (idx, score, tier,
+                    " (assumed CONFIDENTIAL per TF4)" if tier == "UNCLASSIFIED" else "",
+                    ease, exec_count, det))
     lines.append("  start: %s" % path[0]["src"])
     for i, e in enumerate(path, 1):
         logged, note = EDGE_DETECTION.get(e["kind"], (True, ""))
@@ -4919,6 +5063,12 @@ def main(argv=None):
     ap.add_argument("--top", type=int, default=40, help="chains to print")
     ap.add_argument("--data-access-logs-enabled", action="store_true",
                     help="set only if Data Access ADMIN_READ/DATA_READ is enabled org-wide")
+    ap.add_argument("--workspace-log-sharing", action="store_true",
+                    help="set only if Google Workspace data sharing with Google Cloud is on "
+                         "(this, not Data Access logs, is what makes MEMBER_OF visible)")
+    ap.add_argument("--alerting-verified", action="store_true",
+                    help="set only if an alerting policy exists on every always-on method "
+                         "used by these chains; without it D floors at 1.25 per 6.3.2")
     ap.add_argument("--drop-conditional", action="store_true",
                     help="ignore conditional role bindings instead of counting them")
     ap.add_argument("--keep-denied", action="store_true",
@@ -4946,20 +5096,54 @@ def main(argv=None):
         for rec in load_records(path):
             model.ingest_deny(rec)
 
+    # A project-level impersonation binding confers impersonation of EVERY service
+    # account in the project. Any SA seen only as a member string must still become
+    # a node, or the IMPERSONATE / DEPLOY_AS / KEY_MINT edge classes vanish silently
+    # on a run with no --resources export.
+    for (member, _perm) in list(model.holdings):
+        if not member.startswith("serviceAccount:"):
+            continue
+        email = member.split(":", 1)[1]
+        if email in model.sa_emails or "gserviceaccount.com" not in email:
+            continue
+        model.sa_emails[email] = None       # project unknown from the email alone
+        sys.stderr.write("# SA %s inferred from a binding; absent from the resource "
+                         "export - its own project chain is unknown\n" % email)
+    if not args.resources:
+        sys.stderr.write("# WARNING: no --resources export. Service accounts, custom roles "
+                         "and data assets are only partially discoverable; the "
+                         "impersonation/actAs/key-mint edge classes are UNDER-COUNTED. "
+                         "Produce artifact row 8 (SA inventory) before quoting any score.\n")
+
     G = build_graph(model, groups, members_of, groups_of)
 
     # seeds
     if args.seeds:
         seeds = load_json_file(args.seeds)
     else:
+        # One seed set per principal KIND, with the §6.3.2 ease ladder. Collapsing
+        # A1-A7 into one label discards the E factor, and omitting the SA kinds
+        # means A4 (leaked SA key) and A6 (workload -> metadata token) are never
+        # seeded at all. This is still a stand-in for the real §4.5 positions.
+        DEFAULT_EASE = {"public": 5, "federated": 5, "group": 4, "human": 3,
+                        "sa_default_compute": 3, "sa_default_appengine": 3,
+                        "sa_default_cloudbuild": 3, "sa_service_agent": 2,
+                        "ksa": 4, "sa_user_managed": 3}
         seeds = {}
         for nid, n in G.nodes.items():
-            if n["kind"] in ("human", "group", "federated", "public"):
-                seeds.setdefault("A_all_principals", {"principals": [], "ease": 3})
-                seeds["A_all_principals"]["principals"].append(nid)
+            k = n["kind"]
+            if k not in DEFAULT_EASE:
+                continue
+            label = "auto_%s" % k
+            seeds.setdefault(label, {"principals": [], "ease": DEFAULT_EASE[k]})
+            seeds[label]["principals"].append(nid)
+        sys.stderr.write("# NO --seeds FILE: seeding by principal kind with default ease "
+                         "values. These are NOT the A1-A7 starting positions from the "
+                         "threat model - supply --seeds before quoting any score.\n")
 
     all_paths = []
     reach_report = []
+    recorded_not_ranked = set()          # (seed, resource, tier) for INTERNAL/PUBLIC termini
     for adversary, spec in sorted(seeds.items()):
         ease = int(spec.get("ease", 3))
         present = [s for s in spec.get("principals", []) if s in G.nodes]
@@ -4978,10 +5162,13 @@ def main(argv=None):
                 print("# seed not present in the evidence: %s (%s)" % (seed, adversary),
                       file=sys.stderr)
                 continue
-            for path in enumerate_paths(G, seed, args.max_depth, args.max_paths):
+            for path in enumerate_paths(G, seed, args.max_depth, args.max_paths,
+                                        recorded_not_ranked):
                 exec_count = executors(G, path, members_of)
                 score, tier, t, p, d = score_path(G, path, ease, exec_count,
-                                                  args.data_access_logs_enabled)
+                                                  args.data_access_logs_enabled,
+                                                  args.workspace_log_sharing,
+                                                  args.alerting_verified)
                 all_paths.append({"adversary": adversary, "seed": seed, "ease": ease,
                                   "path": path, "score": score, "tier": tier,
                                   "executors": exec_count, "detection_factor": d})
@@ -5021,6 +5208,11 @@ def main(argv=None):
     for (src, dst, kind), n in freq.most_common(15):
         print("#   %3d chains  %s --[%s]--> %s" % (n, src, kind, dst))
 
+    if recorded_not_ranked:
+        print("\n# RECORDED, NOT RANKED (INTERNAL/PUBLIC terminals) - 6.1.5 point 4")
+        for seed, dst, tier in sorted(recorded_not_ranked):
+            print("#   %s reaches %s (%s)" % (seed, dst, tier))
+
     if model.unexpanded:
         print("\n# UNEXPANDED ROLES - resolve with `gcloud iam roles describe ROLE --format=json`",
               file=sys.stderr)
@@ -5031,8 +5223,11 @@ def main(argv=None):
         out = {
             "nodes": list(G.nodes.values()),
             "edges": G.edges,
-            "paths": [{"adversary": r["adversary"], "seed": r["seed"], "score": r["score"],
-                       "band": band(r["score"]), "tier": r["tier"], "ease": r["ease"],
+            "rank_score_note": ("rank_score orders chains; it is NOT a severity band. "
+                                "Band every CH- finding with 11.1.5 / 11.1.8."),
+            "paths": [{"adversary": r["adversary"], "seed": r["seed"], "rank_score": r["score"],
+                       "assumed_confidential": r["tier"] == "UNCLASSIFIED",
+                       "tier": r["tier"], "ease": r["ease"],
                        "executors": r["executors"], "detection_factor": r["detection_factor"],
                        "cut_index": r["cut_index"],
                        "steps": [{"src": e["src"], "dst": e["dst"], "kind": e["kind"],
@@ -5042,6 +5237,8 @@ def main(argv=None):
                                   "deny_note": e.get("deny_note")} for e in r["path"]]}
                       for r in all_paths],
             "reachability": reach_report,
+            "recorded_not_ranked": [{"seed": s, "resource": d, "tier": t}
+                                    for (s, d, t) in sorted(recorded_not_ranked)],
             "unexpanded_roles": dict(model.unexpanded),
         }
         os.makedirs(os.path.dirname(os.path.abspath(args.json_out)), exist_ok=True)
@@ -5080,6 +5277,10 @@ Two rules govern every test below.
    route table, the interior service inventory, or the runner-to-repository map, record the gap as
    an interview-derived finding at the severity the worst plausible answer would earn, and mark it
    `EVIDENCE-GAP`.
+3. **§7 test severities are inputs, not verdicts.** Every `LM-` test is emitted as an `NW-`, `CE-`
+   or `CD-` finding (routing table in §11.2.1) and banded by §11.1.8 against that environment's
+   `T`/`X`/`P`/`S`/`D`. No `LM-` row states a final severity, and a severity word appearing in one
+   is a description of the usual case, never the band you ship.
 
 ### 7.0 Firewall evaluation order — read before scoring any network hop
 
@@ -5129,6 +5330,12 @@ gcloud composer environments list --locations=L --format=json
 gcloud dataproc clusters list --region=R --format="table(clusterName,config.gceClusterConfig.serviceAccount)"
 gcloud dataflow jobs list --region=R --format=json
 gcloud workbench instances list --location=L --format=json     # verify command spelling against current docs
+
+# schedulers, queues and the legacy deployment service - each is an actAs surface (6.2.2)
+gcloud scheduler jobs list --location=L \
+    --format="table(name,httpTarget.oidcToken.serviceAccountEmail,httpTarget.oauthToken.serviceAccountEmail)"
+gcloud tasks queues list --location=L --format=json    # then read each task's oidcToken/oauthToken SA
+gcloud deployment-manager deployments list --format=json   # legacy; runs as PROJECT_NUMBER@cloudservices.gserviceaccount.com
 ```
 
 **Facts that decide the finding.**
@@ -5228,8 +5435,8 @@ accounts, with `enable_logging = true`, and the network set to `BEFORE_CLASSIC_F
 ```bash
 gcloud compute project-info describe --project=P --format="value(commonInstanceMetadata.items)"
 gcloud compute instances describe INSTANCE --zone=Z --format="value(metadata.items)"
-gcloud org-policies describe constraints/compute.requireOsLogin --project=P
-gcloud org-policies describe constraints/compute.disableSerialPortAccess --project=P
+gcloud org-policies describe constraints/compute.requireOsLogin --effective --project=P
+gcloud org-policies describe constraints/compute.disableSerialPortAccess --effective --project=P
 gcloud asset analyze-org-policies --constraint=constraints/compute.requireOsLogin --scope=organizations/ORG_ID
 # who can tunnel:
 gcloud projects get-iam-policy P --format=json | jq '.bindings[] | select(.role=="roles/iap.tunnelResourceAccessor")'
@@ -5660,8 +5867,8 @@ bastion and review **that**.
   confused-deputy protection of the default provider-resource audience.
 - **LM-60 (issuer gate)** — test `WI-08`: `constraints/iam.workloadIdentityPoolProviders` unset, so
   anyone holding `iam.workloadIdentityPools.create` can stand up a pool trusting an attacker's issuer.
-- **LM-61 (deleted-pool window)** — test `WI-10`: a pool is undeletable for 30 days, so deletion is
-  suspension, not destruction. Record who can undelete.
+- **LM-61 (deleted-pool window)** — test `WI-10`: a deleted pool can be undeleted for 30 days, so
+  deletion is suspension, not destruction. Record who can undelete.
 
   Run all four against the runners' providers specifically: a provider that is tight for one
   repository is not tight for a runner group that many repositories can target.
@@ -5730,8 +5937,10 @@ gcloud compute routers list-bgp-routes ROUTER --region=R --peer=PEER \
 **Finding tests.**
 
 - **LM-67** — any interior resolver returns a non-`199.36.153.4/30` address for `*.googleapis.com`
-  while a perimeter protects CONFIDENTIAL or NTK projects. **Severity: high** — on-prem-originated
-  API calls bypass the perimeter entirely.
+  while a perimeter protects CONFIDENTIAL or NTK projects. On-prem-originated API calls bypass the
+  perimeter entirely. Score with §11.1: this is `X = EGRESS-OUT` whenever a reachable credential can
+  read CONFIDENTIAL/NTK, which bands **CRITICAL** at `S1` (assume-breach interior) — see the worked
+  chain `CH-03` in §11.3.2, which bands exactly this condition against exactly this evidence.
 - **LM-68** — `199.36.153.4/30` absent from `--route-direction=ADVERTISED` on any session that
   carries API traffic; or a **per-session** custom advertisement that omits it while the router-level
   advertisement includes it (the session-level override wipes the router-level set).
@@ -5782,8 +5991,8 @@ gcloud compute routers list-bgp-routes ROUTER --region=R --peer=PEER \
 gcloud compute forwarding-rules list --project=P \
   --filter="target~serviceAttachments OR pscConnectionId:*" --format=json
 gcloud compute service-attachments list --project=P --format=json   # command spelling: verify against current docs
-gcloud org-policies describe constraints/compute.disablePrivateServiceConnectCreationForConsumers --project=P
-gcloud org-policies describe constraints/compute.restrictPrivateServiceConnectProducer --project=P
+gcloud org-policies describe constraints/compute.disablePrivateServiceConnectCreationForConsumers --effective --project=P
+gcloud org-policies describe constraints/compute.restrictPrivateServiceConnectProducer --effective --project=P
 ```
 
 **Finding tests.**
@@ -6011,7 +6220,7 @@ whole-cluster principalSet when a single KSA is meant.
 | Egress subject to VPC controls | `--vpc-egress=all-traffic` pinned by `constraints/run.allowedVPCEgress`. With `private-ranges-only`, **public internet egress bypasses the VPC entirely** — NGFW policy, Cloud NAT logging and flow logs never see it. | ISO-28: `private-ranges-only` on any service that can read classified data |
 | HTTP surfaces behind IAP | IAP with `roles/iap.tunnelResourceAccessor` scoped per resource for TCP | ISO-29: tunnel role at project scope |
 | mTLS with mesh authorization policies | **No GCP org-policy enforcement exists** for mesh authorization policy content. **Compensating gate:** policy-as-code check that every mesh workload has an `AuthorizationPolicy` with a non-empty principals selector, plus a CI test that an unauthenticated call from another namespace is refused. | ISO-30: a mesh service with a permissive or absent authorization policy |
-| **No source-IP-only authorization** | **No platform enforcement exists.** **Compensating gate:** a mandatory design-review question, answered per internal service, recorded in the service catalog. | ISO-31 — the cloud-side turtle problem: any internal service that authorizes on source IP or subnet alone. Test: from a workload in the same subnet but with a different SA and no application credential, call the service; a `200` proves IP-only authorization. |
+| **No source-IP-only authorization** | **No platform enforcement exists.** **Compensating gate:** a mandatory design-review question, answered per internal service, recorded in the service catalog. | ISO-31: the cloud-side turtle problem — any internal service that authorizes on source IP or subnet alone. Test: from a workload in the same subnet but with a different SA and no application credential, call the service; a `200` proves IP-only authorization. |
 
 ### 8.5 Data-plane isolation
 
@@ -6054,8 +6263,13 @@ PAB gap to state rather than gloss: `*.createPolicyBinding`, `*.deletePolicyBind
 `*.updatePolicyBinding` and `*.searchPolicyBindings` are documented exceptions at every enforcement
 version, so **PAB cannot prevent someone from removing PAB bindings** (test `PB-06`). Symmetrically,
 `iam.googleapis.com/denypolicies.*` is absent from the deny-supported list, so deny cannot protect
-deny (test `DN-09`). Both gaps close only with org-node role hygiene plus real-time alerting; do not
-propose a technical enforcement that does not exist.
+deny (test `DN-09`). The one partial technical control that does exist is §5.5 deny rule #12
+(`iam.googleapis.com/principalaccessboundarypolicies.*`, which covers `.bind`/`.unbind`) plus role
+hygiene on `roles/iam.principalAccessBoundaryUser`, `roles/resourcemanager.projectIamAdmin` and
+`roles/resourcemanager.folderIamAdmin` — all three carry `*.deletePolicyBinding`. Beyond that the
+gaps close only with org-node role hygiene plus real-time alerting on `iam.denypolicies` and
+policy-binding mutations. **Do not propose a technical enforcement that does not exist** — in
+particular, PAB is not the answer for either gap, and it cannot be bound to a Google group (§5.7).
 
 ```hcl
 resource "google_iam_principal_access_boundary_policy" "svc_a" {
@@ -6073,11 +6287,8 @@ resource "google_iam_principal_access_boundary_policy" "svc_a" {
 }
 ```
 
-PAB gap to state rather than gloss: `*.createPolicyBinding`, `*.deletePolicyBinding`,
-`*.updatePolicyBinding` and `*.searchPolicyBindings` are documented exceptions at every enforcement
-version, so **PAB cannot prevent someone from removing PAB bindings**. Protect those with IAM Deny
-and role hygiene. Symmetrically, `iam.googleapis.com/denypolicies.*` is absent from the
-deny-supported list, so deny cannot protect deny — use PAB (v3+) and org-level role hygiene there.
+(The PAB / deny self-protection gap and its compensating controls are stated once, above this
+Terraform block — tests `PB-06` and `DN-09`. Do not restate it per requirement row.)
 
 ### 8.7 Enforcement plumbing — every control, all three layers
 
@@ -6143,34 +6354,34 @@ bindings | Shared VPC role (host/service/none)`.
 
 **Finding tests.**
 
-- **HI-1** — any project parented directly to the organization node. It cannot receive
+- **HI-01** — any project parented directly to the organization node. It cannot receive
   folder-scoped hierarchical firewall policies, folder-level IAM, or folder-level deny policies.
-- **HI-2** — a project holding CONFIDENTIAL or NTK data sharing a folder with dev, sandbox or
+- **HI-02** — a project holding CONFIDENTIAL or NTK data sharing a folder with dev, sandbox or
   experimentation projects. A folder-level policy must then be the loosest of the two populations,
   which is the whole reason to separate them.
-- **HI-3** — a constraint set at a lower node **without** `inheritFromParent: true`, voiding the
+- **HI-03** — a constraint set at a lower node **without** `inheritFromParent: true`, voiding the
   ancestor policy there. Resolve every exfil-relevant constraint with
   `gcloud asset analyze-org-policies`, never by reading the org-level policy alone. Note the merge
   rule for list constraints: `DENY` values always take precedence; and **managed constraints do not
   merge at all** — an inherited managed constraint is not combined with a child's.
-- **HI-4** — a **tag-conditioned** org policy rule (`resource.matchTag(...)`) whose tag value can
+- **HI-04** — a **tag-conditioned** org policy rule (`resource.matchTag(...)`) whose tag value can
   be attached by anyone outside the guardrail group. Whoever can set the tag grants themselves the
   exception. Enumerate `roles/resourcemanager.tagUser` and `roles/resourcemanager.tagAdmin` holders
   alongside every conditional policy. "The constraint is enforced" is not a sufficient finding.
-- **HI-5** — on an org created on or after 2024-05-03, **absence** of any of the seven baseline
+- **HI-05** — on an org created on or after 2024-05-03, **absence** of any of the seven baseline
   constraints enumerated in test `OP-01` means someone deliberately deleted it, not that it was
   never set. High-signal finding: pull the `google.cloud.orgpolicy.v2.OrgPolicy.DeletePolicy` event
   (filter `F7`) and name the principal.
-- **HI-6** — `resourcemanager.projects.setIamPolicy`, `resourcemanager.folders.setIamPolicy`
+- **HI-06** — `resourcemanager.projects.setIamPolicy`, `resourcemanager.folders.setIamPolicy`
   or `resourcemanager.organizations.setIamPolicy` held at org or at a folder containing prod by any principal that also
   holds a deploy role. Guardrail-change and workload-deploy must be disjoint principal sets.
-- **HI-7** — `roles/orgpolicy.policyAdmin` (an organization-level-only role) held by a deploy
+- **HI-07** — `roles/orgpolicy.policyAdmin` (an organization-level-only role) held by a deploy
   identity, or held without an IAM condition at org scope. It is a meta-privilege: its holder can
   delete `constraints/iam.allowedPolicyMemberDomains` and then grant an external principal any role.
-- **HI-8** — holders of `resourcemanager.projects.move` / `projects.create` outside the platform
+- **HI-08** — holders of `resourcemanager.projects.move` / `projects.create` outside the platform
   group. `gcloud projects move` sheds inherited org policies **and** perimeter membership in one
   command (ATT&CK T1666 — the GCP framing is an analyst mapping, present it as such).
-- **HI-9** — the aggregated log sink destination project, or the SCC project, sits in a folder
+- **HI-09** — the aggregated log sink destination project, or the SCC project, sits in a folder
   where workload principals hold any write role. Also verify the sink writer identity
   (`serviceAccount:service-ORG_NUMBER@gcp-sa-logging.iam.gserviceaccount.com` form) has a grant on
   the destination, and that no project-level `_Default` sink exclusion shadows it — an org sink does
@@ -6300,21 +6511,40 @@ Separation of duties is enforced through **folder-level IAM**: the group that ad
 
 ```hcl
 # ---------- folders ----------
-resource "google_folder" "common" { display_name = "common"  parent = "organizations/${var.org_id}" }
-resource "google_folder" "prod"   { display_name = "prod"    parent = "organizations/${var.org_id}" }
-resource "google_folder" "ntk"    { display_name = "prod-ntk" parent = google_folder.prod.name }
+resource "google_folder" "common" {
+  display_name = "common"
+  parent       = "organizations/${var.org_id}"
+}
+
+resource "google_folder" "prod" {
+  display_name = "prod"
+  parent       = "organizations/${var.org_id}"
+}
+
+resource "google_folder" "ntk" {
+  display_name = "prod-ntk"
+  parent       = google_folder.prod.name
+}
 
 # ---------- baseline guardrails at the org root ----------
 resource "google_org_policy_policy" "no_sa_keys" {
   name   = "organizations/${var.org_id}/policies/iam.managed.disableServiceAccountKeyCreation"
   parent = "organizations/${var.org_id}"
-  spec { rules { enforce = "TRUE" } }
+  spec {
+    rules {
+      enforce = "TRUE"
+    }
+  }
 }
 
 resource "google_org_policy_policy" "no_cross_project_sa" {
   name   = "organizations/${var.org_id}/policies/iam.disableCrossProjectServiceAccountUsage"
   parent = "organizations/${var.org_id}"
-  spec { rules { enforce = "TRUE" } }
+  spec {
+    rules {
+      enforce = "TRUE"
+    }
+  }
 }
 
 # ---------- prod-only tightening, inherited by every future prod project ----------
@@ -6379,12 +6609,23 @@ resource "google_iam_deny_policy" "guardrail_mutation" {
         "orgpolicy.googleapis.com/policies.delete",
         "orgpolicy.googleapis.com/customConstraints.create",
         "orgpolicy.googleapis.com/customConstraints.update",
+        "orgpolicy.googleapis.com/customConstraints.delete",
         "accesscontextmanager.googleapis.com/servicePerimeters.create",
         "accesscontextmanager.googleapis.com/servicePerimeters.update",
         "accesscontextmanager.googleapis.com/servicePerimeters.delete",
+        "accesscontextmanager.googleapis.com/servicePerimeters.replaceAll",
+        "accesscontextmanager.googleapis.com/servicePerimeters.commit",
         "accesscontextmanager.googleapis.com/accessLevels.create",
         "accesscontextmanager.googleapis.com/accessLevels.update",
         "accesscontextmanager.googleapis.com/accessLevels.delete",
+        "accesscontextmanager.googleapis.com/accessLevels.replaceAll",
+        "accesscontextmanager.googleapis.com/policies.create",
+        "accesscontextmanager.googleapis.com/policies.update",
+        "accesscontextmanager.googleapis.com/policies.delete",
+        "accesscontextmanager.googleapis.com/policies.setIamPolicy",
+        "accesscontextmanager.googleapis.com/authorizedOrgsDescs.create",
+        "accesscontextmanager.googleapis.com/authorizedOrgsDescs.update",
+        "accesscontextmanager.googleapis.com/authorizedOrgsDescs.delete",
         "logging.googleapis.com/sinks.delete",
         "logging.googleapis.com/sinks.update"
       ]
@@ -6392,6 +6633,13 @@ resource "google_iam_deny_policy" "guardrail_mutation" {
   }
 }
 ```
+
+This block is the org-node instance of §5.5 rules #8–#10, and every line of it is load-bearing.
+`servicePerimeters.replaceAll` wipes **every** perimeter in the access policy in one call;
+`.commit` promotes an attacker-authored dry-run spec to enforced; `policies.delete` deletes the access
+policy outright, taking every perimeter with it; `customConstraints.delete` removes the constraint that
+alert filter `F7` fires on. Omitting any of the four leaves a live bypass of the whole VPC-SC control
+plane. If you trim this list, re-run test `SC-25` against the result before calling the gap closed.
 
 Use `google_org_policy_policy` and `google_org_policy_custom_constraint` (Org Policy **v2**), never
 `google_organization_policy` / `google_project_organization_policy` — the v1 resources cannot express
@@ -6424,7 +6672,7 @@ Run this **before** Phase 2. Merging after assessment invalidates the assessment
 3. **Handle untestable statements.** If you cannot write `test` as an observable check against an
    intake artifact, do not drop the rule and do not guess. Record it with
    `test = UNTESTABLE-AS-WRITTEN` and emit this literal question:
-   > "Requirement `SR-0NN` states: *"<verbatim statement>"*. What observable configuration would you
+   > "Requirement `SR-nnn` states: *"<verbatim statement>"*. What observable configuration would you
    > accept as proof this is met — which resource, which field, and which value?"
 4. **Classify each supplied rule against the baseline.** Find the baseline rules covering the same
    control target (same constraint name, same permission string, same resource class, same
@@ -6451,15 +6699,15 @@ Run this **before** Phase 2. Merging after assessment invalidates the assessment
 ### 10.2 Conflict report shape
 
 ```
-SR-0NN (conflict)
-  Supplied rule:   SR-0NN — "<verbatim statement from the requirements file>"
+SR-nnn (conflict)
+  Supplied rule:   SR-nnn — "<verbatim statement from the requirements file>"
                    source: <file>.md § "<heading path>" (line N)
   Baseline rule:   <skill section> — "<baseline requirement, quoted>"
   Conflict type:   ADDITIVE | STRICTER | LOOSER | CONTRADICTORY
   Disagreement:    <one sentence: what the supplied rule permits or requires that the baseline does not>
   Exfil delta:     <which attack path is no longer interrupted, at which step, and what control remains>
   Assessed under:  BOTH — finding <SR-id> against the supplied rule; finding <baseline-id> retained
-                   and marked "in conflict with SR-0NN"
+                   and marked "in conflict with SR-nnn"
   Decision needed: "<literal question put to the human owner>"
 ```
 
@@ -6648,7 +6896,11 @@ attack surface; then higher `P` first; then lower `S` first; then lower ID first
 
 `PREFIX-NN`, two digits, zero-padded, assigned in discovery order within each prefix. IDs are stable:
 never renumber across report revisions; a withdrawn finding keeps its ID and is marked `WITHDRAWN`
-with the reason.
+with the reason. Two width exceptions, both deliberate: **`SR-` uses three digits** (`SR-001`), because
+a supplied requirements file routinely carries more than 99 rules; and the **test-ID namespace below
+(`LM-`, `ISO-`) is not zero-padded**, because those IDs are read out of this skill and never sorted in
+Appendix E. Every *finding* prefix, `HI-` included, is two digits and zero-padded — Appendix E sorts
+lexicographically, so `HI-01` files between `HI-12` and `HI-02`.
 
 | Prefix | Area |
 |---|---|
@@ -6674,7 +6926,6 @@ with the reason.
 | `SR-` | **Supplementary-requirement gap** — the environment fails a requirement from the supplied `.md`, or a supplied requirement conflicts with a baseline recommendation |
 | `DC-` | **Unclassified or mis-classified data store** — a data-bearing resource with no classification label/tag, or one whose label contradicts its contents |
 | `VD-` | Appendix-only: an item this review could not verify against current documentation |
-
 | `DRIFT-` | IaC-declared state vs live state divergence (§2.1) |
 | `LM-` | **Test ID, not a finding** — a traversal check in §7 |
 | `ISO-` | **Test ID, not a finding** — a service-isolation check in §8 |
@@ -6686,10 +6937,30 @@ Two ID namespaces exist and must not be collapsed. **Finding IDs** are the prefi
 the report, numbered in discovery order, stable across revisions. **Test IDs** are the numbered checks
 inside this skill — §5's catalog tests share the finding prefix (`SC-04`, `IA-02`, `LG-13`), while
 §7's traversal tests (`LM-nn`) and §8's isolation tests (`ISO-nn`) carry their own. A failed `LM-` or
-`ISO-` test is emitted under the area prefix above (`NW-`, `CE-`, `PS-`, `CD-`, `DP-`, `FW-`, `IM-`),
-citing the test ID in its `Misconfiguration` line. Every finding therefore reads
-`<finding ID> (test <test ID>)`. **Write a test reference as `test SC-04`, never bare:** a bare
-`SC-04` anywhere in a report is a finding ID, and the two namespaces reuse the same numbers.
+`ISO-` test is emitted under the area prefix given by the routing table below, citing the test ID in
+its `Misconfiguration` line. Every finding therefore reads `<finding ID> (test <test ID>)`.
+**Write a test reference as `test SC-04`, never bare:** a bare `SC-04` anywhere in a report is a
+finding ID, and the two namespaces reuse the same numbers.
+
+**Test-ID → finding-prefix routing.** This is the whole mapping; do not choose a prefix by feel. Where
+a subsection routes to two prefixes, the second applies only in the stated case.
+
+| Test IDs from | Emit under | Second prefix, when |
+|---|---|---|
+| §7.0, §7.1.2 (flat VPC), §7.1.5 (Shared VPC), §7.1.6 (cross-project) | `NW-` | `FW-` when the defect is a specific firewall rule or its priority |
+| §7.1.1 (metadata → SA token), §7.1.3 (SSH/serial/IAP), §7.1.4 (GKE) | `CE-` | `IM-` when the finding's subject is the token/impersonation edge rather than the compute surface |
+| §7.2.1–§7.2.4 (cloud → on-prem) | `NW-` | `DP-` when the finding is about where CONFIDENTIAL data lands, not about reachability |
+| §7.3.1 (credentials on interior hosts) | `CD-` | `ID-` when the credential is a user-managed SA key (lifecycle, not pipeline) |
+| §7.3.2 (self-hosted GHES runners) | `CD-` | `WI-` when the defect is the WIF provider's `attributeCondition` |
+| §7.3.3 (federated humans from the interior IdP) | `WI-` | — |
+| §7.3.4 (restricted VIP / DNS), §7.3.5 (interior reach to PSC) | `NW-` | `PS-` when the object is a PSC endpoint or service attachment |
+| §8.1 (identity isolation) | `IM-` | `ID-` for SA-key and default-SA lifecycle |
+| §8.2 (resource/project isolation) | `HI-` | `OP-` when the missing enforcement is an org-policy constraint |
+| §8.3 (network isolation) | `FW-` | `NW-` for GKE NetworkPolicy and inter-subnet reachability |
+| §8.4 (service-to-service auth) | `CE-` | — |
+| §8.5 (data-plane isolation) | `DP-` | — |
+| §8.6 (boundary isolation) | `SC-` | `PB-` for the PAB-per-service-principal row |
+| §8.7 (enforcement plumbing) | the prefix of the control the row governs | `LG-` when the missing layer is runtime detection |
 
 #### 11.2.2 Fully-qualified name forms (use these, not display names)
 
@@ -6710,7 +6981,7 @@ citing the test ID in its `Misconfiguration` line. Every finding therefore reads
 Every finding uses exactly these fields, in this order. No field is omitted; a field with nothing to
 say says why.
 
-```markdown
+````markdown
 #### <ID> — <title: names the resource and the defect, no verbs like "review" or "harden">
 
 - **Severity**: <BAND> (T=…, X=…, P=…, S=…, D=…; base <BAND> <±modifier>)
@@ -6736,7 +7007,7 @@ say says why.
 - **Blast radius**: <what stops working, who notices, how to enumerate the affected callers BEFORE applying>
 - **Rollback**: <exact command that reverts, time to revert, whether the revert is itself detectable>
 - **Verify fix**: <one command whose output proves the finding is closed>
-```
+````
 
 Rules that bind the template:
 
@@ -6754,9 +7025,11 @@ Rules that bind the template:
 
 #### 11.2.4 Worked example — organization-policy finding
 
-> **EXAMPLE — shape and specificity only. Resource names are illustrative.**
+> **EXAMPLE — shape and specificity only. Resource names are illustrative. Chain IDs (`CH-nn`) and
+> finding IDs shown here are illustrative placeholders, not cross-references; real ones are assigned
+> at review time.**
 
-```markdown
+````markdown
 #### OP-02 — `constraints/storage.publicAccessPrevention` unset at the org node and unenforced on two CONFIDENTIAL projects
 
 - **Severity**: CRITICAL (T=CONFIDENTIAL, X=EGRESS-OUT, P=UNBOUNDED, S=S0, D=UNDETECTED; base CRITICAL, capped)
@@ -6800,7 +7073,7 @@ Rules that bind the template:
   EOF
   gcloud org-policies set-policy /tmp/pap.yaml
   gcloud org-policies describe constraints/storage.publicAccessPrevention \
-      --organization=123456789012 --format=json
+      --effective --project=data-prod-01 --format=json
   ```
   ```hcl
   resource "google_org_policy_policy" "public_access_prevention" {
@@ -6820,15 +7093,15 @@ Rules that bind the template:
 - **Rollback**: `gcloud org-policies delete constraints/storage.publicAccessPrevention --organization=123456789012`
   (requires `roles/orgpolicy.policyAdmin`). The deletion is logged as
   `google.cloud.orgpolicy.v2.OrgPolicy.DeletePolicy` in org-level ADMIN_ACTIVITY — alert on it (alert filter `G`, §5.12).
-- **Verify fix**: `gcloud org-policies describe constraints/storage.publicAccessPrevention --organization=123456789012 --format="value(spec.rules[0].enforce)"` returns `True`, and creating a public binding on
+- **Verify fix**: `gcloud org-policies describe constraints/storage.publicAccessPrevention --effective --project=data-prod-01 --format="value(spec.rules[0].enforce)"` returns `True` (`--effective`, and at the **project** node — the org-node read would report "fixed" while a project override still disables it), and creating a public binding on
   `gs://data-prod-01-landing` fails.
-```
+````
 
 #### 11.2.5 Worked example — impersonation-chain finding
 
 > **EXAMPLE — shape and specificity only. Resource names are illustrative.**
 
-```markdown
+````markdown
 #### IM-01 — `roles/iam.serviceAccountTokenCreator` bound to `group:eng-all@example.com` at project scope on `projects/data-prod-01`
 
 - **Severity**: CRITICAL (T=CONFIDENTIAL, X=EGRESS-OUT, P=212, S=S1, D=UNDETECTED; base CRITICAL, capped)
@@ -6937,7 +7210,7 @@ Rules that bind the template:
   then re-add the project-level binding. Both actions are ADMIN_ACTIVITY-logged.
 - **Verify fix**: `gcloud policy-troubleshoot iam //iam.googleapis.com/projects/data-prod-01/serviceAccounts/etl-writer@data-prod-01.iam.gserviceaccount.com --permission=iam.serviceAccounts.getAccessToken --principal-email=<an eng-all member>` returns denied, and
   `gcloud projects get-iam-policy data-prod-01` shows no project-level `roles/iam.serviceAccountTokenCreator`.
-```
+````
 
 ---
 
@@ -6973,7 +7246,9 @@ the prose line.
 
 #### 11.3.2 Worked example
 
-> **EXAMPLE — shape and specificity only. Resource names are illustrative.**
+> **EXAMPLE — shape and specificity only. Resource names are illustrative. Chain IDs (`CH-nn`) and
+> finding IDs shown here are illustrative placeholders, not cross-references; real ones are assigned
+> at review time.**
 
 ```markdown
 #### CH-03 — On-prem interior foothold → cached SA key → public API path → CONFIDENTIAL BigQuery read → export to outside project — CRITICAL
@@ -7027,7 +7302,7 @@ Appendices:
 |---|---|
 | **A — Raw evidence used** | One row per artifact: what it is, the exact command or export that produced it, collection timestamp, who collected it, and the finding IDs that cite it. Anything you were told but not shown is listed here as `[INTERVIEW]` with the artifact that would replace it |
 | **B — Privilege graph** | Node table (principal / resource, type, tier held); edge table (source → target, the permission that creates the edge, scope of the binding); the reachability closure per adversary starting position; the `TOP CUTS` list; the `UNEXPANDED ROLES` list from the §6.5 helper; and the residual-blind-spot list from §6.1.6, copied verbatim |
-| **C — Merged supplementary requirements** | The supplied requirements as parsed, each mapped to `satisfied` (with the citing finding or evidence), `SR-nn gap`, or `SR-nn conflict` with the baseline recommendation it contradicts and both positions stated. Nothing silently dropped. If no file was supplied, say so in one line |
+| **C — Merged supplementary requirements** | The supplied requirements as parsed, each mapped to `satisfied` (with the citing finding or evidence), `SR-nnn gap`, or `SR-nnn conflict` with the baseline recommendation it contradicts and both positions stated. Nothing silently dropped. If no file was supplied, say so in one line |
 | **D — "Verify against current docs" list** | Every `VD-nn`: the identifier or claim, where it appears in the report, why it could not be verified, and what would settle it |
 | **E — Findings index** | ID → title → band → report section, sorted by ID |
 | **F — Open questions for the customer** | The literal questions still unanswered, each tagged with the finding whose severity or scope depends on the answer |
@@ -7192,6 +7467,10 @@ Replacement rule for the four that reviewers reach for most:
 
 #### 11.6.3 BAD / GOOD contrast pairs
 
+> **EXAMPLE — shape and specificity only. Resource names, chain IDs (`CH-nn`) and finding IDs inside
+> the GOOD strings are illustrative placeholders, not cross-references; real ones are assigned at
+> review time.**
+
 - **BAD**: "Sensitive buckets should not be publicly accessible."
   **GOOD**: "`constraints/storage.publicAccessPrevention` is unset at the org node and unenforced on
   projects `data-prod-01` and `analytics-prod-03`, which hold CONFIDENTIAL data. Set it to `enforced`
@@ -7236,9 +7515,9 @@ Replacement rule for the four that reviewers reach for most:
 
 #### 11.6.4 Self-audit checklist
 
-The fourteen checks are the *Skill self-check* at the end of this file. Run all fourteen over the
-finished report file, record the result of each in your working notes (not in the report), and do not
-emit until every one passes.
+The seventeen checks are the *Skill self-check* at the end of this file — `0a`–`0c` plus 1–14. Run
+all seventeen over the finished report file, record the result of each in your working notes (not in
+the report), and do not emit until every one passes.
 
 #### 11.6.5 Unimplementable-remediation blocklist (check 14)
 
@@ -7262,10 +7541,11 @@ right-hand column.
 | WIF via OIDC from an air-gapped GitHub Enterprise Server | Name the actual options — runner on a GCE VM or GKE with an attached identity, X.509-certificate-based WIF, or an internet-reachable corporate IdP — and treat any surviving SA key as the credential the compensating controls must carry `(verify against current docs)` before designing around static JWKS |
 | A filter on `protoPayload.methodName="google.iam.credentials.v1.GenerateAccessToken"` | The bare method names `GenerateAccessToken` / `GenerateIdToken` / `SignJwt` / `SignBlob` with `serviceName="iamcredentials.googleapis.com"` |
 | A single-string filter on `SetIamPolicy` | The versioned, resource-scoped strings — `cloudresourcemanager.v3.projects.setIamPolicy`, `…folders.setIamPolicy`, `…organizations.setIamPolicy`, and `google.iam.admin.v1.SetIAMPolicy` (capital `IAM`) |
+| A PAB policy binding whose target is a Google group (`group:…`) | Bind at the org / folder / project, Workspace-domain, or workforce/workload-pool principal set, or condition the binding on `principal.subject` — `group:` is not a PAB principal set, so "mitigated: PAB bound to `grp-x@`" certifies a control that cannot be created |
 
 #### 11.6.6 Failing the gate
 
-A report that fails any of the 14 checks is **revised and re-checked before emission**. Do not ship a
+A report that fails any of the 17 checks (`0a`–`0c` and 1–14) is **revised and re-checked before emission**. Do not ship a
 report with a caveat that says a check failed — the caveat is the failure. If a check cannot be
 satisfied because the environment did not supply the evidence, that is not a gate failure: convert
 the affected item to an `[INTERVIEW]` finding with the capped severity, put the missing artifact in
@@ -7280,7 +7560,20 @@ paths 301-redirect and break fetchers that do not follow cross-host redirects), 
 v19.0/v19.1 (released 2026-04-28) and the GitHub Enterprise Server docs at versions 3.15, 3.17 and
 3.21. Every identifier in this skill that is **not** listed below was read off a rendered official
 page on that date. Everything listed below was **not** confirmed and carries the literal marker
-`(verify against current docs)` at its point of use in the body — 122 such markers appear above.
+`verify against current docs` at its point of use in the body. The two sets are **not** 1:1 by count —
+one row routinely covers two or three identifiers that each carry their own marker, and the marker
+sometimes reads `(verify against current docs)`, sometimes `— verify against current docs`. Derive the
+counts, never assert them:
+
+```bash
+grep -c -o 'verify against current docs' SKILL_FILE     # markers, body + appendix
+grep -o '^| `VD-[0-9]\+`' SKILL_FILE | sort -u | wc -l  # Appendix D rows
+```
+
+The binding relation is by **identifier**, not by count: every marked identifier must be named in some
+row below, and every row's identifier must appear at least once in the body. A marker you cannot match
+to a row means the identifier is unverified and un-tracked — open a new `VD-` row for it rather than
+dropping the marker (self-check 13).
 
 **How to use this section.** Before you assert any row below in a finding, a remediation snippet, a
 detection filter, or a design, fetch the current page and confirm it. If it confirms, drop the marker
@@ -7312,7 +7605,7 @@ Two standing staleness warnings that outrank any individual row:
 | `VD-07` | The IAM-Condition CEL syntax for tag-scoping a `roles/orgpolicy.policyAdmin` binding (test `OP-05`, mirror case) | IAM Conditions attribute reference |
 | `VD-08` | Minimum Terraform provider versions for `google_org_policy_policy` and `google_org_policy_custom_constraint` | Provider changelog |
 | `VD-09` | Deprecation text for `google_project_organization_policy` specifically | Provider registry page |
-| `VD-10` | `--effective` flag on `gcloud org-policies describe`. Route effectiveness through `gcloud asset analyze-org-policies`, which is confirmed | gcloud reference |
+| `VD-10` | `gcloud org-policies describe --effective` — **now verified** against the gcloud reference SYNOPSIS `(--folder \| --organization \| --project) [--effective]`; retained as a row only so a reader of an earlier revision does not reinstate the removed hedge | gcloud reference |
 | `VD-11` | `gcloud asset analyze-org-policy-governed-assets` and `…-governed-containers` flag sets | gcloud reference |
 | `VD-12` | Casing of `constraints/compute.disableGuestAttributesAccess` — doc pages conflict | Compute org-policy page |
 | `VD-13` | Hierarchy-indicator value format (`under:organizations/…`) for `constraints/compute.restrictPrivateServiceConnectProducer` / `…Consumer` | PSC org-policy page |
@@ -7387,7 +7680,7 @@ Two standing staleness warnings that outrank any individual row:
 | `VD-67` | SHA finding-category names other than `AUDIT_LOGGING_DISABLED` and `NON_ORG_IAM_MEMBER` — `LOG_NOT_EXPORTED`, `USER_MANAGED_SERVICE_ACCOUNT_KEY`, `PRIMITIVE_ROLES_USED`, `MFA_NOT_ENFORCED` and similar are unconfirmed (test `LG-20`) | SHA findings reference |
 | `VD-68` | ETD detector names beyond those listed in §4.7.4 — the detector index page renders as navigation only | ETD detector index |
 | `VD-69` | BigQuery job `methodName` values for filter `F16`, and the copy/share method names for `AP-07` | BigQuery audit-logging page |
-| `VD-70` | Compute control-plane method names for filters `F17`/`F5` in §4.7.2 (firewall-policy, forwarding-rule and Resource Manager move methods) | Per-service audit-logging pages |
+| `VD-70` | Compute control-plane and Resource Manager method names for filters `F17` / `F18` in §4.7.3 (firewall-policy, forwarding-rule and project-move methods) | Per-service audit-logging pages |
 | `VD-71` | BigQuery, KMS and Secret Manager `setIamPolicy` audit method names (`storage.setIamPermissions` is verified) | Per-service audit-logging pages |
 | `VD-72` | IAP per-connection tunnel-authorization audit method name — **`AuthorizeUser` is NOT in the documented method list** (test `LM-14`) | IAP audit-logging page |
 | `VD-73` | Numeric TA ID for the ATT&CK v19 **Stealth** tactic (Defense Impairment is `TA0112`, verified) | ATT&CK site |
@@ -7441,13 +7734,15 @@ Two standing staleness warnings that outrank any individual row:
 | `VD-111` | Managed-folder and object-prefix IAM Condition semantics as the object-level control under uniform bucket-level access (test `ISO-34`) | Cloud Storage managed-folders page |
 | `VD-112` | Per-resource `get-iam-policy` flag spellings used in §2.2, row 4 | Per-service CLI references |
 | `VD-113` | Per-product support matrix for **direct resource access** by a federated principal versus impersonation (test `WI-12`) — the matrix did not render in validation | Identity-federation supported-products page |
+| `VD-114` | Deny **permission-group** support per service beyond the confirmed list in test `DN-03`: the `accesscontextmanager.googleapis.com/{servicePerimeters,accessLevels,policies,authorizedOrgsDescs,gcpUserAccessBindings}.*` families, `logging.googleapis.com/exclusions.*`, `iam.googleapis.com/workloadIdentityPoolProviders.*`, `iam.googleapis.com/workforcePoolProviders.*`, `iam.googleapis.com/oauthClientCredentials.*` (used in recommended deny rules #9, #10, #11) | Deny-supported-permissions reference table |
+| `VD-115` | The three deny permission-group **forms** — `SERVICE_FQDN/RESOURCE.*`, `SERVICE_FQDN/*.*`, `SERVICE_FQDN/*.VERB` — as a taxonomy (test `DN-03`); the fact base confirms individual group strings but not the pattern list | `docs.cloud.google.com/iam/docs/deny-overview` |
 
 ---
 
 ## Skill self-check — run before emitting
 
-Run all fourteen checks over the finished report file. Record each result in your working notes, not
-in the report. A report that fails any check is revised and re-checked before emission; a caveat
+Run all seventeen checks over the finished report file — checks `0a`–`0c` first, then 1–14. Record
+each result in your working notes, not in the report. A report that fails any check is revised and re-checked before emission; a caveat
 saying a check failed **is** the failure. If a check cannot be satisfied because the environment did
 not supply the evidence, that is not a gate failure — convert the affected item to an `[INTERVIEW]`
 finding with the severity cap from §11.1.7, put the missing artifact in Appendix A and the literal
@@ -7472,29 +7767,47 @@ question in Appendix F, and re-run.
    names the artifact and its collection timestamp.
 8. **Banned-phrase grep returns zero admissible hits.** A hit is admissible **only** inside a
    backticked identifier or a block-quoted verbatim documentation string; everything else is revised.
+   The pattern covers **every** phrase in §11.6.2 — including `should be reviewed`, `misconfigured`,
+   `unauthorized access`, `critical importance` and `sensitive data should be protected`, which are
+   hand-cleared exactly like `consider`. `$REPORT` is the **absolute** path written in §11.4.2 step 1;
+   a bare relative glob matches nothing when the report is written outside the cwd, and a grep that
+   matches no file passes vacuously.
    ```bash
-   grep -n -i -E "ensure|as appropriate|where appropriate|review carefully|carefully review|regularly review|periodically|best practice|industry standard|consider|least privilege|restrict service account permissions|excessive permissions|overly permissive|properly configured|robust|adequate|as needed|if necessary|it is recommended|may want to|harden|lock down|tighten|defense in depth|monitor for suspicious|implement monitoring|poses a risk|could potentially|attackers may|increases the attack surface|significant risk" \
-     gcp-security-review-*.md
+   # $REPORT is the absolute path written in 11.4.2 step 1. Fail loudly if it does not exist.
+   test -f "$REPORT" || { echo "GATE ERROR: report not found at $REPORT"; exit 2; }
+   grep -n -i -E "ensure|as appropriate|where appropriate|review carefully|carefully review|should be reviewed|regularly review|periodically|best practice|industry standard|consider|least privilege|restrict service account permissions|excessive permissions|overly permissive|properly configured|misconfigured|unauthorized access|critical importance|sensitive data should be protected|robust|adequate|as needed|if necessary|it is recommended|may want to|harden|lock down|tighten|defense in depth|monitor for suspicious|implement monitoring|poses a risk|could potentially|attackers may|increases the attack surface|significant risk" \
+     "$REPORT"
    ```
 9. **Every chain names its cheapest severing control**, the finding ID that carries that remediation,
    and a one-line reason it is cheapest.
 10. **Every roadmap row has an owner and a dependency cell** that is a finding ID, a row number, or
     the literal `none`; and every roadmap row references at least one finding ID.
-11. **Every supplementary requirement is accounted for** in Appendix C as `satisfied`, `SR-nn gap`, or
-    `SR-nn (conflict)`. Zero silently dropped.
+11. **Every supplementary requirement is accounted for** in Appendix C as `satisfied`, `SR-nnn gap`, or
+    `SR-nnn (conflict)`. Zero silently dropped.
 12. **Every data-bearing resource in the inventory carries a classification**, or has a `DC-` finding
     against it.
-13. **Every `(verify against current docs)` marker has a matching `VD-nn` row** in Appendix D, and
-    every `VD-nn` row is cited somewhere in the body.
+13. **Every `(verify against current docs)` marker resolves to an Appendix D row, and every row
+    resolves back.** Run it, do not eyeball it:
+    ```bash
+    grep -c -o '(verify against current docs' "$REPORT"          # marker count
+    grep -o '^| `VD-[0-9]\+`' "$REPORT" | sort -u | wc -l        # Appendix D row count
+    ```
+    Then, for each marker, the **identifier it marks** must appear verbatim in some `VD-` row's text,
+    and for each `VD-` row the identifier it names must appear at least once in the body. A marker
+    whose identifier matches no row is a gate failure — open a new `VD-` row for it before emitting.
+    A row whose identifier appears nowhere in the body is a stale row — delete it. The counts need not
+    be equal (one row may cover two identifiers that carry one marker each), but every marker and
+    every row must be reachable from the other side by identifier.
 14. **No unimplementable recommendation appears anywhere** — check the report against the blocklist in
     §11.6.5.
 
-Three checks on the review itself, not on the prose, run before check 1:
+Three checks on the review itself, not on the prose. They are numbered `0a`–`0c` because they run
+**before** check 1, and they are not optional: skipping them is the same gate failure as skipping 1–14.
 
-- **Every finding cites an `AP-nn` and an `A1`–`A7` adversary.** A finding that cites neither is a
+- **0a. Every finding cites an `AP-nn` and an `A1`–`A7` adversary.** A finding that cites neither is a
   configuration observation, not a security finding: move it to the appendix.
-- **The reachability closure ran to fixpoint**, not to a fixed depth, and the `TOP CUTS` list from
+- **0b. The reachability closure ran to fixpoint**, not to a fixed depth, and the `TOP CUTS` list from
   §6.5 drives the roadmap ordering. Re-run the helper after each proposed sever: a fix that does not
   reduce the reported chain count severed nothing.
-- **Both directions of the cloud↔on-prem link have a measured answer**, not a design-document answer.
-  A direction you did not measure is reported as unmeasured, never as absent.
+- **0c. Both directions of the cloud↔on-prem link have a measured answer**, not a design-document
+  answer. A direction you did not measure is reported as unmeasured, never as absent.
